@@ -7,12 +7,16 @@ export interface ApiOperations {
   getReadiness: { response: { status: "ready" | "unavailable"; network: "testnet"; database: "disabled" | "ready" | "unavailable" } };
   listScenarios: { response: { items: ScenarioSummary[] } };
   getScenario: { params: { scenarioId: string }; response: ValidatedScenario };
+  /** Issue #70 — returns the canonical v1 scenario JSON Schema. */
+  getScenarioSchemaV1: { response: Record<string, unknown> };
   validateScenario: { body: ScenarioDefinition | string; response: { valid: true; scenarioId: string; scenarioVersion: number; schemaVersion: 1; contentHash: string } };
   listScenarioVersions: { params: { scenarioId: string }; query: { limit?: number; cursor?: number }; response: { items: ScenarioVersionSummary[]; nextCursor?: number } };
   getScenarioVersion: { params: { scenarioId: string; version: number }; response: ValidatedScenario };
   exportScenarioVersion: { params: { scenarioId: string; version: number }; query: { format?: "json" | "yaml" }; response: string };
-  startCataloguedRun: { body: { scenarioId: string; inputs?: Record<string, never> }; response: RunReport };
-  startDefinitionRun: { body: ScenarioDefinition | string; response: RunReport };
+  /** Issue #71 — scenarioVersion selects an exact published version or validates against the bundled version. Issue #72 — Idempotency-Key header deduplicates within the retention window. */
+  startCataloguedRun: { body: { scenarioId: string; scenarioVersion?: number; inputs?: Record<string, never> }; headers?: { "idempotency-key"?: string }; response: RunReport };
+  /** Issue #72 — Idempotency-Key header deduplicates within the retention window. */
+  startDefinitionRun: { body: ScenarioDefinition | string; headers?: { "idempotency-key"?: string }; response: RunReport };
   getRun: { params: { runId: string }; response: RunReport };
   downloadRunReport: { params: { runId: string }; response: RunReport };
 }

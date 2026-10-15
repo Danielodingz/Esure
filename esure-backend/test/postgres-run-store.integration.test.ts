@@ -9,6 +9,8 @@ import type { RunReport } from "../src/domain.js";
 import { Database, runMigrations } from "../src/database.js";
 import type { AppConfig } from "../src/config.js";
 import { PostgresRunStore } from "../src/run-store.js";
+import { PublishedScenarioRepository } from "../src/published-scenarios.js";
+import { createScenarioRegistry } from "../src/scenarios.js";
 import { buildApp } from "../src/app.js";
 
 const port = 55_433;
@@ -30,6 +32,7 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     const roles = await readFile(resolve("database/bootstrap-roles.sql"), "utf8");
     await database.query(roles);
     await runMigrations(database);
+    await new PublishedScenarioRepository(database).reconcile(createScenarioRegistry());
     store = new PostgresRunStore(database, 60_000);
   }, 60_000);
 
