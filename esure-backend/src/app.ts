@@ -1,24 +1,42 @@
+import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 import type { AppConfig } from "./config.js";
-import type { LedgerGateway, ValidatedScenario } from "./domain.js";
+import type { LedgerGateway, RunReport, ValidatedScenario } from "./domain.js";
 import { RunCapacityError } from "./errors.js";
 import { DatabaseUnavailableError } from "./database.js";
 import { openApiDocument } from "./openapi.js";
 import { FixedWindowRateLimiter } from "./rate-limiter.js";
 import { RunService } from "./run-service.js";
 import { InMemoryRunStore } from "./run-store.js";
-import { parseScenario, prepareScenario } from "./scenario-loader.js";
-import { ScenarioValidationError } from "./scenario-schema.js";
+import { parseScenario, prepareScenario, canonicalJson } from "./scenario-loader.js";
+import { scenarioSchemaV1, ScenarioValidationError } from "./scenario-schema.js";
 import { createScenarioRegistry } from "./scenarios.js";
 import { StellarTestnetGateway } from "./stellar-gateway.js";
 import { PersistenceCoordinator } from "./persistence.js";
+import { IdempotencyStore } from "./idempotency-store.js";
 
 interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; }
 
 const runBodySchema = {
   type: "object", additionalProperties: false, required: ["scenarioId"],
-  properties: { scenarioId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9-]+$" }, inputs: { type: "object", additionalProperties: false, default: {} } },
+  properties: {
+    scenarioId: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9-]+$" },
+    scenarioVersion: { type: "integer", minimum: 1, maximum: 2_147_483_647 },
+    inputs: { type: "object", additionalProperties: false, default: {} },
+  },
 } as const;
+
+/** Maximum Idempotency-Key length accepted (issue #72). */
+const IDEMPOTENCY_KEY_MAX_LENGTH = 128;
+
+/** Maximum number of in-flight idempotency entries (issue #72). */
+const IDEMPOTENCY_MAX_ENTRIES = 1_000;
+
+/**
+ * Retention window for idempotency entries: 24 h (issue #72).
+ * Entries older than this are pruned lazily on the next lookup.
+ */
+const IDEMPOTENCY_RETENTION_MS = 86_400_000;
 
 export function buildApp(options: BuildAppOptions): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
@@ -28,6 +46,14 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   app.addHook("onReady", async () => persistence.initialize());
   app.addHook("onClose", async () => persistence.close());
   const limiter = new FixedWindowRateLimiter(options.config.rateLimitWindowMs);
+
+  // Idempotency store shared across both run-creation endpoints (issue #72).
+  // RunService.start returns Promise<RunReport>, so T = RunReport.
+  const idempotency = new IdempotencyStore<RunReport>(
+    IDEMPOTENCY_MAX_ENTRIES,
+    IDEMPOTENCY_RETENTION_MS,
+  );
+
   app.addHook("onRequest", async (request, reply) => {
     const path = request.url.split("?")[0];
     const isRunCreation = request.method === "POST" && (path === "/api/v1/runs" || path === "/api/v1/runs/definitions");
@@ -48,7 +74,26 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     return { status: "ready", network: "testnet", database: persistence.state === "disabled" ? "disabled" : "ready" };
   });
   app.get("/openapi.json", async () => openApiDocument());
-  app.get("/api/v1/scenarios", async () => ({ items: persistence.repository ? await persistence.repository.list() : registry.list() }));
+
+  // ── Issue #70: canonical schema endpoint ──────────────────────────────────
+  app.get("/api/v1/schemas/scenario-v1.json", async (_request, reply) => {
+    return reply.type("application/json").send(scenarioSchemaV1);
+  });
+
+  // ── Issue #69: conditional GET for scenario catalogue ─────────────────────
+  app.get("/api/v1/scenarios", async (request, reply) => {
+    const items = persistence.repository ? await persistence.repository.list() : registry.list();
+    const etag = catalogueETag(items);
+    // Always include explicit revalidation directives so both browsers and
+    // reverse proxies know the resource must be revalidated before reuse.
+    reply.header("ETag", etag).header("Cache-Control", "no-cache");
+    const ifNoneMatch = (request.headers["if-none-match"] as string | undefined)?.trim();
+    if (ifNoneMatch && (ifNoneMatch === etag || ifNoneMatch === `W/${etag}`)) {
+      return reply.code(304).send();
+    }
+    return { items };
+  });
+
   app.get<{ Params: { scenarioId: string } }>("/api/v1/scenarios/:scenarioId", async (request, reply) => {
     const scenario = persistence.repository ? await persistence.repository.latest(request.params.scenarioId) : registry.find(request.params.scenarioId);
     if (!scenario) return reply.code(404).send(apiError("SCENARIO_NOT_FOUND", "The requested scenario is not available.", request.id));
@@ -82,12 +127,79 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     const scenario = submittedScenario(request.body, request.headers["content-type"]);
     return { valid: true, scenarioId: scenario.id, scenarioVersion: scenario.version, schemaVersion: scenario.schemaVersion, contentHash: scenario.contentHash };
   });
-  app.post<{ Body: { scenarioId: string; inputs?: Record<string, never> } }>("/api/v1/runs", { schema: { body: runBodySchema } }, async (request, reply) => {
-    const scenario = registry.find(request.body.scenarioId);
-    if (!scenario) return reply.code(404).send(apiError("SCENARIO_NOT_FOUND", "The requested scenario is not available.", request.id));
+
+  // ── Issue #71: exact version run creation + Issue #72: idempotency ────────
+  app.post<{ Body: { scenarioId: string; scenarioVersion?: number; inputs?: Record<string, never> } }>("/api/v1/runs", { schema: { body: runBodySchema } }, async (request, reply) => {
+    const { scenarioId, scenarioVersion } = request.body;
+
+    // Resolve the scenario from the active catalogue source (issue #71).
+    let scenario: ValidatedScenario | undefined;
+    if (persistence.repository) {
+      // Published mode: resolve from the persistent catalogue.
+      if (scenarioVersion !== undefined) {
+        scenario = await persistence.repository.version(scenarioId, scenarioVersion);
+        if (!scenario) return reply.code(404).send(apiError("SCENARIO_VERSION_NOT_FOUND", `Scenario ${scenarioId} version ${scenarioVersion} is not available in the published catalogue.`, request.id));
+      } else {
+        scenario = await persistence.repository.latest(scenarioId);
+        if (!scenario) return reply.code(404).send(apiError("SCENARIO_NOT_FOUND", "The requested scenario is not available.", request.id));
+      }
+    } else {
+      // Disabled (bundled) mode: bundled registry holds exactly one version.
+      scenario = registry.find(scenarioId);
+      if (!scenario) return reply.code(404).send(apiError("SCENARIO_NOT_FOUND", "The requested scenario is not available.", request.id));
+      if (scenarioVersion !== undefined && scenario.version !== scenarioVersion) {
+        // The bundled definition's version does not match the caller's
+        // expectation. Reject explicitly so the caller is not silently
+        // executing a different definition than the one they saw.
+        return reply.code(409).send(apiError(
+          "SCENARIO_VERSION_MISMATCH",
+          `Bundled scenario ${scenarioId} is at version ${scenario.version}, not version ${scenarioVersion}. Omit scenarioVersion to always execute the current bundled definition.`,
+          request.id,
+        ));
+      }
+    }
+
+    // Idempotency (issue #72).
+    const idempotencyKey = extractIdempotencyKey(request.headers["idempotency-key"]);
+    if (idempotencyKey) {
+      const fingerprint = requestFingerprint({ scenarioId, scenarioVersion });
+      const outcome = idempotency.insert(idempotencyKey, fingerprint, () => runs.start(scenario));
+      if (outcome.status === "conflict") {
+        return reply.code(409).send(apiError("IDEMPOTENCY_CONFLICT", "The Idempotency-Key was already used with a different request body.", request.id));
+      }
+      if (outcome.status === "capacity") {
+        return reply.code(503).send(apiError("IDEMPOTENCY_CAPACITY", "The idempotency store is at capacity. Retry without an Idempotency-Key or try again later.", request.id));
+      }
+      // Both "created" and "existing" return the settled result of the original
+      // promise, which may be from a concurrent or prior request.
+      return reply.code(202).send(await outcome.entry.result);
+    }
+
     return reply.code(202).send(await runs.start(scenario));
   });
-  app.post("/api/v1/runs/definitions", async (request, reply) => reply.code(202).send(await runs.start(submittedScenario(request.body, request.headers["content-type"]))));
+
+  app.post("/api/v1/runs/definitions", async (request, reply) => {
+    const scenario = submittedScenario(request.body, request.headers["content-type"]);
+
+    // Idempotency (issue #72).
+    const idempotencyKey = extractIdempotencyKey(request.headers["idempotency-key"]);
+    if (idempotencyKey) {
+      // The canonical fingerprint covers the entire definition so any field
+      // change produces a different fingerprint.
+      const fingerprint = requestFingerprint(scenario);
+      const outcome = idempotency.insert(idempotencyKey, fingerprint, () => runs.start(scenario));
+      if (outcome.status === "conflict") {
+        return reply.code(409).send(apiError("IDEMPOTENCY_CONFLICT", "The Idempotency-Key was already used with a different request body.", request.id));
+      }
+      if (outcome.status === "capacity") {
+        return reply.code(503).send(apiError("IDEMPOTENCY_CAPACITY", "The idempotency store is at capacity. Retry without an Idempotency-Key or try again later.", request.id));
+      }
+      return reply.code(202).send(await outcome.entry.result);
+    }
+
+    return reply.code(202).send(await runs.start(scenario));
+  });
+
   app.get<{ Params: { runId: string } }>("/api/v1/runs/:runId", async (request, reply) => {
     const run = await runs.get(request.params.runId);
     if (!run) return reply.code(404).send(apiError("RUN_NOT_FOUND", "The requested run does not exist.", request.id));
@@ -117,6 +229,37 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     return reply.code(500).send(apiError("INTERNAL_ERROR", "The request could not be completed.", request.id));
   });
   return app;
+}
+
+// ── Issue #69: deterministic ETag for catalogue responses ─────────────────
+/**
+ * Produce a deterministic ETag for the given catalogue items.
+ * The hash covers the sorted canonical JSON of every summary so that any
+ * change to a version number or content hash produces a different ETag,
+ * regardless of the order in which items are returned from the database.
+ */
+function catalogueETag(items: { id: string; version: number; contentHash: string }[]): string {
+  const sorted = [...items].sort((a, b) => a.id.localeCompare(b.id));
+  const digest = createHash("sha256")
+    .update(canonicalJson(sorted.map(({ id, version, contentHash }) => ({ id, version, contentHash }))))
+    .digest("hex");
+  return `"${digest}"`;
+}
+
+// ── Issue #72: idempotency helpers ─────────────────────────────────────────
+function extractIdempotencyKey(header: unknown): string | undefined {
+  if (typeof header !== "string") return undefined;
+  const trimmed = header.trim();
+  if (!trimmed || trimmed.length > IDEMPOTENCY_KEY_MAX_LENGTH) return undefined;
+  return trimmed;
+}
+
+/**
+ * Canonical JSON fingerprint of the run-creation request body.
+ * Used to detect conflicts when the same key is reused with a different body.
+ */
+function requestFingerprint(body: unknown): string {
+  return createHash("sha256").update(canonicalJson(body)).digest("hex");
 }
 
 function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number): number {

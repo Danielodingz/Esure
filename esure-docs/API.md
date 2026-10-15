@@ -23,9 +23,20 @@ The backend publishes its machine-readable OpenAPI 3.1 document at
 }
 ```
 
+## Canonical scenario schema
+
+### `GET /api/v1/schemas/scenario-v1.json`
+
+Returns the canonical machine-readable JSON Schema for scenario definitions at schema version 1.
+Served directly from the authoritative TypeScript definition with `Content-Type: application/json`.
+Note that JSON Schema alone cannot express all semantic constraints (such as exactly one native asset, valid identifier references, Stellar signed 64-bit stroop limits, secret seed prohibitions, and 16 384 byte payload limit), which are enforced by the validator.
+
 ## List scenarios
 
 ### `GET /api/v1/scenarios`
+
+Supports conditional GET via deterministic `ETag` and `Cache-Control: no-cache` headers.
+When an `If-None-Match` header matches the current catalogue fingerprint, returns `304 Not Modified` with an empty body.
 
 ```json
 {
@@ -65,9 +76,13 @@ Request:
 ```json
 {
   "scenarioId": "issued-asset-payment",
+  "scenarioVersion": 1,
   "inputs": {}
 }
 ```
+
+- `scenarioVersion` (optional integer, >= 1): Selects an exact published scenario version. Omitting `scenarioVersion` executes the latest version from the active catalogue source. When run in disabled (bundled) mode, providing a version that mismatches the bundled version returns `409 SCENARIO_VERSION_MISMATCH`.
+- `Idempotency-Key` (optional header, 1–128 chars): Deduplicates run creation within a 24-hour retention window. Sending the same key and identical request returns the existing run. Reusing the key with a different request returns `409 IDEMPOTENCY_CONFLICT`. If store capacity is reached, returns `503 IDEMPOTENCY_CAPACITY`.
 
 Accepted response (`202`):
 
@@ -76,6 +91,7 @@ Accepted response (`202`):
   "id": "6e43bd3a-2278-4eaa-901e-f89d733d92e1",
   "status": "requested",
   "scenarioId": "issued-asset-payment",
+  "scenarioVersion": 1,
   "createdAt": "2026-08-06T12:00:00.000Z"
 }
 ```
@@ -83,7 +99,7 @@ Accepted response (`202`):
 Catalogued scenarios remain supported. To execute a validated client-supplied
 Scenario Schema v1 definition, POST the raw JSON or YAML document to
 `/api/v1/runs/definitions` using `application/json`, `application/yaml`, or
-`text/yaml`. Validate without execution at `/api/v1/scenarios/validate`.
+`text/yaml`. The `Idempotency-Key` header is also supported on this route. Validate without execution at `/api/v1/scenarios/validate`.
 
 ## Read a run
 
@@ -145,4 +161,8 @@ Errors must not expose secret keys, raw internal exceptions, or configuration.
 - `TRANSACTION_FAILED`
 - `ASSERTION_FAILED`
 - `RATE_LIMITED`
+- `SCENARIO_VERSION_NOT_FOUND`
+- `SCENARIO_VERSION_MISMATCH`
+- `IDEMPOTENCY_CONFLICT`
+- `IDEMPOTENCY_CAPACITY`
 - `INTERNAL_ERROR`
