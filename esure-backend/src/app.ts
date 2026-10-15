@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
+export type AppInstance = FastifyInstance & { runs: RunService };
 import type { AppConfig } from "./config.js";
 import type { LedgerGateway, RunReport, ValidatedScenario } from "./domain.js";
 import { RunCapacityError } from "./errors.js";
@@ -228,7 +229,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     request.log.error({ err: error }, "Unhandled request error");
     return reply.code(500).send(apiError("INTERNAL_ERROR", "The request could not be completed.", request.id));
   });
-  return app;
+  const instance = app as unknown as AppInstance;
+  instance.runs = runs;
+  return instance;
 }
 
 // ── Issue #69: deterministic ETag for catalogue responses ─────────────────
