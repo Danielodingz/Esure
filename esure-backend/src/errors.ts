@@ -7,6 +7,32 @@ export class SafeRunError extends Error {
   }
 }
 
+const TESTNET_RETRY_SUGGESTION = "This may be a temporary Testnet issue. Try again.";
+
+export function friendbotTimeoutError(failedStepId: string): SafeRunError {
+  return new SafeRunError({
+    code: "FRIENDBOT_UNAVAILABLE",
+    message: `Friendbot did not respond in time. ${TESTNET_RETRY_SUGGESTION}`,
+    category: "network",
+    retryable: true,
+    failedStepId,
+  });
+}
+
+export function horizonTimeoutError(
+  request: "transaction submission" | "account loading",
+): SafeRunError {
+  const service = request === "transaction submission"
+    ? "Horizon transaction submission"
+    : "Horizon account loading";
+  return new SafeRunError({
+    code: "HORIZON_UNAVAILABLE",
+    message: `${service} timed out. ${TESTNET_RETRY_SUGGESTION}`,
+    category: "network",
+    retryable: true,
+  });
+}
+
 export class RunCapacityError extends SafeRunError {
   constructor(message = "The runner is at capacity. Try again later.") {
     super({ code: "RUNNER_AT_CAPACITY", message, category: "capacity", retryable: true });
