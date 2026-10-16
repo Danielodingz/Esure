@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, act, within } from "@testing-library/react";
 import { Dashboard, filterScenario } from "./dashboard";
 import * as api from "@/lib/api";
 import { type RunReport } from "@/lib/api";
@@ -53,6 +53,43 @@ const mockRun: RunReport = {
   assertions: [],
   summary: { stepsPassed: 0, stepsFailed: 0, assertionsPassed: 0, assertionsFailed: 0 },
 };
+
+const mixedOutcomeRun: RunReport = {
+  ...mockRun,
+  status: "failed",
+  steps: [
+    { id: "create-account", type: "create_account", status: "passed", message: "PASSING STEP MESSAGE" },
+    { id: "send-payment", type: "payment", status: "failed", message: "FAILING STEP MESSAGE" },
+  ],
+  assertions: [
+    { type: "balance", status: "passed", expected: "100", actual: "100", message: "PASSING ASSERTION MESSAGE" },
+    { type: "payment", status: "failed", expected: "50", actual: "0", message: "FAILING ASSERTION MESSAGE" },
+  ],
+  summary: { stepsPassed: 1, stepsFailed: 1, assertionsPassed: 1, assertionsFailed: 1 },
+};
+
+const allPassRun: RunReport = {
+  ...mockRun,
+  steps: [{ id: "create-account", type: "create_account", status: "passed", message: "ALL PASS STEP MESSAGE" }],
+  assertions: [{ type: "balance", status: "passed", expected: "100", actual: "100", message: "ALL PASS ASSERTION MESSAGE" }],
+  summary: { stepsPassed: 1, stepsFailed: 0, assertionsPassed: 1, assertionsFailed: 0 },
+};
+
+const timedOutRun: RunReport = {
+  ...allPassRun,
+  status: "failed",
+  error: {
+    code: "RUN_TIMEOUT",
+    message: "The run exceeded its time limit.",
+    category: "timeout",
+    retryable: false,
+  },
+};
+
+function changeDocumentVisibility(state: "visible" | "hidden") {
+  Object.defineProperty(document, "visibilityState", { configurable: true, value: state });
+  document.dispatchEvent(new Event("visibilitychange"));
+}
 
 describe("filterScenario helper", () => {
   it("includes all scenarios when filter is 'all'", () => {
@@ -167,6 +204,81 @@ describe("Dashboard component scenario filtering", () => {
     expect(screen.getByText("00 AVAILABLE")).toBeDefined();
     expect(screen.getByText("No scenarios found")).toBeDefined();
     expect(screen.getByRole("status")).toBeDefined();
+  });
+});
+
+describe("Dashboard report filtering", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams("?runId=run-123");
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+  });
+
+  it("filters mixed step and assertion outcomes without changing run totals", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mixedOutcomeRun);
+
+    render(<Dashboard />);
+    await screen.findByText("PASSING STEP MESSAGE");
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+
+    expect(reportFilters.getByRole("button", { name: "Failed" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("PASSING STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+    expect(screen.getByText("PASSING ASSERTION MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+    expect(screen.getByText("FAILING STEP MESSAGE")).toBeDefined();
+    expect(screen.getByText("FAILING ASSERTION MESSAGE")).toBeDefined();
+    expect(screen.getByText("Steps passed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+    expect(screen.getByText("Steps failed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+    expect(screen.getByText("Assertions passed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+    expect(screen.getByText("Assertions failed").parentElement?.querySelector("dd")?.textContent).toBe("1");
+  });
+
+  it("shows a distinct empty state when an all-pass report has no failed checks", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(allPassRun);
+
+    render(<Dashboard />);
+    await screen.findByText("ALL PASS STEP MESSAGE");
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+
+    expect(screen.getByText("No failed checks")).toBeDefined();
+    expect(screen.getByText("No steps or assertions are currently marked as failed.")).toBeDefined();
+    expect(screen.getByText("ALL PASS STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+    expect(screen.getByText("ALL PASS ASSERTION MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+  });
+
+  it("keeps run-level timeout errors visible with no failed rows", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(timedOutRun);
+
+    render(<Dashboard />);
+    await screen.findByText("RUN_TIMEOUT");
+    expect(screen.getByText("ALL PASS STEP MESSAGE")).toBeDefined();
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+
+    expect(screen.getByText("No failed checks")).toBeDefined();
+    expect(screen.getByText("The run timed out before any step or assertion was marked as failed.")).toBeDefined();
+    expect(screen.getByText("RUN_TIMEOUT")).toBeDefined();
+    expect(screen.getByText("The run exceeded its time limit.")).toBeDefined();
+    expect(screen.getByText("ALL PASS STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+  });
+
+  it("opens the browser print flow for a terminal report", async () => {
+    const printMock = vi.spyOn(window, "print").mockImplementation(() => undefined);
+    vi.spyOn(api, "getRun").mockResolvedValue(mixedOutcomeRun);
+
+    render(<Dashboard />);
+    await screen.findByText("FAILING STEP MESSAGE");
+    fireEvent.click(screen.getByRole("button", { name: "Print report" }));
+
+    expect(printMock).toHaveBeenCalledOnce();
   });
 });
 
@@ -326,6 +438,7 @@ describe("Dashboard Sequential Polling and Recovery", () => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
     cleanup();
+    Reflect.deleteProperty(document, "visibilityState");
     vi.restoreAllMocks();
   });
 
@@ -357,6 +470,109 @@ describe("Dashboard Sequential Polling and Recovery", () => {
     expect(getRunMock).toHaveBeenCalledTimes(4); 
 
     expect(screen.queryByText("Monitoring paused")).toBeNull();
+  });
+
+  it("retains the failed report filter when polling updates the run", async () => {
+    const initialRun = { ...mixedOutcomeRun, status: "running" as const };
+    const updatedRun = {
+      ...initialRun,
+      steps: [...initialRun.steps, { id: "verify-ledger", type: "ledger", status: "passed" as const, message: "POLLING UPDATE PASS MESSAGE" }],
+    };
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce(initialRun)
+      .mockResolvedValueOnce(updatedRun);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(screen.getByText("PASSING STEP MESSAGE")).toBeDefined();
+
+    const reportFilters = within(screen.getByRole("group", { name: "Report filter" }));
+    fireEvent.click(reportFilters.getByRole("button", { name: "Failed" }));
+    expect(screen.getByText("FAILING STEP MESSAGE")).toBeDefined();
+    expect(screen.getByText("PASSING STEP MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    expect(reportFilters.getByRole("button", { name: "Failed" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("FAILING STEP MESSAGE")).toBeDefined();
+    expect(screen.getByText("POLLING UPDATE PASS MESSAGE").closest(".report-row")).toHaveAttribute("hidden");
+  });
+
+  it("stops scheduling while hidden and refreshes immediately when visible", async () => {
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-01T00:00:00.000Z" })
+      .mockResolvedValueOnce({ ...mockRun, status: "pending", createdAt: "2026-01-02T00:00:00.000Z" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    act(() => { changeDocumentVisibility("hidden"); });
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => { changeDocumentVisibility("visible"); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => { vi.advanceTimersByTime(999); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+    await act(async () => { vi.advanceTimersByTime(1); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("aborts an in-flight refresh on hide and ignores its stale result", async () => {
+    let resolveInFlight!: (value: RunReport) => void;
+    let inFlightSignal: AbortSignal | undefined;
+    const getRunMock = vi.spyOn(api, "getRun")
+      .mockResolvedValueOnce({ ...mockRun, status: "pending" })
+      .mockImplementationOnce((_runId, signal) => {
+        inFlightSignal = signal;
+        return new Promise((resolve) => { resolveInFlight = resolve; });
+      })
+      .mockResolvedValueOnce({ ...mockRun, status: "passed" });
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(2);
+
+    act(() => { changeDocumentVisibility("hidden"); });
+    expect(inFlightSignal?.aborted).toBe(true);
+
+    await act(async () => {
+      resolveInFlight({ ...mockRun, id: "stale-run", status: "failed" });
+      await Promise.resolve();
+    });
+    expect(screen.getAllByText("Pending").length).toBeGreaterThan(0);
+    expect(screen.queryByText("stale-run")).toBeNull();
+
+    await act(async () => { changeDocumentVisibility("visible"); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+    expect(screen.getAllByText("Passed").length).toBeGreaterThan(0);
+
+    act(() => { changeDocumentVisibility("hidden"); });
+    act(() => { changeDocumentVisibility("visible"); });
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("removes the visibility listener and scheduled timer on unmount", async () => {
+    const addListener = vi.spyOn(document, "addEventListener");
+    const removeListener = vi.spyOn(document, "removeEventListener");
+    const getRunMock = vi.spyOn(api, "getRun").mockResolvedValue({ ...mockRun, status: "pending" });
+    const { unmount } = render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    const visibilityListener = addListener.mock.calls.find(([type]) => type === "visibilitychange")?.[1];
+    expect(visibilityListener).toBeDefined();
+    const callsBeforeUnmount = getRunMock.mock.calls.length;
+
+    unmount();
+    expect(removeListener).toHaveBeenCalledWith("visibilitychange", visibilityListener);
+    await act(async () => { vi.advanceTimersByTime(5000); await Promise.resolve(); });
+    expect(getRunMock).toHaveBeenCalledTimes(callsBeforeUnmount);
   });
 
   it("stops polling and clears run when RUN_NOT_FOUND occurs", async () => {

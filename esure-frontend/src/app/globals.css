@@ -53,6 +53,13 @@ button { color:inherit; }
 .workspace { border-bottom:1px solid var(--line); }
 .section-heading { display:flex; justify-content:space-between; align-items:end; margin-bottom:28px; }
 .section-heading h2 { margin:8px 0 0; font-size:34px; letter-spacing:-.045em; }
+.report-controls { display:flex; align-items:center; gap:14px; }
+.report-filters { display:flex; gap:6px; }
+.report-filters .filter-pill { padding:7px 12px; }
+.print-button { padding:7px 12px; border:1px solid var(--line); background:transparent; font:600 11px var(--font-mono); cursor:pointer; }
+.print-button:hover { border-color:var(--deep); }
+.print-button:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
+.print-report-header,.print-only,.print-status-label { display:none; }
 .scenario-count { font:500 10px var(--font-mono); letter-spacing:.12em; color:var(--muted); }
 .scenario-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; min-height:240px; }
 .scenario-card { position:relative; min-height:240px; padding:26px; text-align:left; display:flex; flex-direction:column; align-items:flex-start; background:transparent; border:1px solid var(--line); border-radius:3px; cursor:pointer; transition:.2s ease; }
@@ -76,6 +83,9 @@ button { color:inherit; }
 .results { min-height:560px; }
 .empty-report { min-height:310px; border:1px dashed #b8b4a9; display:flex; flex-direction:column; justify-content:center; align-items:center; text-align:center; }
 .empty-report strong { margin-top:20px; font-size:20px; }.empty-report p { color:var(--muted); max-width:380px; }
+.empty-checks { padding:28px 24px; border-bottom:1px solid var(--line); text-align:center; }
+.empty-checks strong { display:block; font-size:15px; }
+.empty-checks p { max-width:440px; margin:7px auto 0; color:var(--muted); font-size:12px; line-height:1.5; }
 .empty-glyph { display:flex; align-items:end; gap:6px; }.empty-glyph span { display:block; width:8px; background:var(--deep); }.empty-glyph span:nth-child(1){height:18px}.empty-glyph span:nth-child(2){height:35px;background:var(--green)}.empty-glyph span:nth-child(3){height:26px}
 .report-grid { display:grid; grid-template-columns:1fr 300px; gap:14px; }
 .timeline-card,.summary-card { border:1px solid var(--line); background:#f8f6f0; }
@@ -147,6 +157,7 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
   .verified-chip { top:82px; right:10px; }
   .section-heading { align-items:flex-start; gap:16px; }
   .section-heading h2 { font-size:29px; }
+  .report-controls { flex-wrap:wrap; justify-content:flex-end; gap:8px; }
   .scenario-count { padding-top:5px; white-space:nowrap; }
   .scenario-card { min-height:190px; padding:22px; }
   .scenario-icon { margin-bottom:22px; }
