@@ -111,21 +111,44 @@ const failedRun: RunReport = {
       id: "pay-demo",
       type: "payment",
       status: "failed",
+      transactionHash: "f6e5d4c3b2a178901234567890abcdef1234567890abcdef1234567890abcdef",
       stellarTransactionCode: "tx_failed",
       stellarOperationCodes: ["op_no_trust"],
       message: "Stellar rejected step pay-demo with tx_failed/op_no_trust.",
     },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      id: `review-step-${String(index + 1).padStart(2, "0")}`,
+      type: "payment",
+      status: index % 3 === 0 ? "failed" as const : "passed" as const,
+      message: `Long report review detail for step ${index + 1}: the operation result and its bounded Testnet evidence are included here to exercise print wrapping and pagination.`,
+    })),
   ],
-  assertions: [],
+  assertions: [
+    {
+      type: "balanceEquals",
+      status: "passed",
+      expected: "100",
+      actual: "100",
+      message: "Passing balance assertion.",
+    },
+    {
+      type: "paymentDelivered",
+      status: "failed",
+      expected: true,
+      actual: false,
+      message: "Failed payment assertion.",
+    },
+  ],
   summary: {
-    stepsPassed: 1,
-    stepsFailed: 1,
-    assertionsPassed: 0,
-    assertionsFailed: 0,
+    stepsPassed: 9,
+    stepsFailed: 5,
+    assertionsPassed: 1,
+    assertionsFailed: 1,
   },
   error: {
     code: "STELLAR_TRANSACTION_FAILED",
-    message: "Stellar rejected step pay-demo with tx_failed/op_no_trust.",
+    message: "Stellar rejected step pay-demo with tx_failed/op_no_trust. " +
+      "Additional review context: the report must preserve this detailed failure text within page bounds. ".repeat(18),
     category: "stellar",
     retryable: false,
     failedStepId: "pay-demo",
@@ -355,9 +378,37 @@ test.describe("Failed Run and Error States", () => {
     await expect(runError).toContainText("Stellar rejected step pay-demo with tx_failed/op_no_trust.");
 
     // Verify summary counts reflection
-    await expect(page.locator(".summary-card dl")).toContainText("Steps failed1");
+    await expect(page.locator(".summary-card dl")).toContainText("Steps failed5");
+
+    const reportFilters = page.getByRole("group", { name: "Report filter" });
+    await expect(reportFilters.getByRole("button", { name: "All" })).toHaveAttribute("aria-pressed", "true");
+    await reportFilters.getByRole("button", { name: "Failed" }).click();
+    await expect(reportFilters.getByRole("button", { name: "Failed" })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(".timeline-row", { hasText: "Test accounts funded." })).toHaveCount(0);
+    await expect(page.locator(".timeline-row", { hasText: "Stellar rejected step pay-demo" })).toBeVisible();
+    await expect(page.locator(".assertion", { hasText: "Passing balance assertion." })).toHaveCount(0);
+    await expect(page.locator(".assertion", { hasText: "Failed payment assertion." })).toBeVisible();
+    await expect(runError).toBeVisible();
+    await expect(page.locator(".summary-card dl")).toContainText("Steps failed5");
+
+    await reportFilters.getByRole("button", { name: "All" }).click();
+    await expect(page.locator(".timeline-row", { hasText: "Test accounts funded." })).toBeVisible();
+    await expect(page.locator(".assertion", { hasText: "Passing balance assertion." })).toBeVisible();
+
+    await page.emulateMedia({ media: "print" });
+    await expect(page.locator(".print-report-header")).toBeVisible();
+    await expect(page.locator(".print-report-header")).toContainText("Issued Asset Payment");
+    await expect(page.locator(".print-report-header")).toContainText("sha256:2222222222222222222222222222222222222222222222222222222222222222");
+    await expect(page.locator(".transaction-hash")).toContainText("f6e5d4c3b2a178901234567890abcdef1234567890abcdef1234567890abcdef");
+    await expect(page.locator(".print-status-label").filter({ hasText: "Failed" })).toBeVisible();
+    await expect(page.locator(".launch-panel")).toBeHidden();
+    await expect(page.locator(".scenario-grid")).toBeHidden();
+    await expect(reportFilters).toBeHidden();
+    const pdf = await page.pdf({ printBackground: true });
+    expect(pdf.subarray(0, 5).toString()).toBe("%PDF-");
 
     // Download link is still provided for failed runs for inspection
+    await page.emulateMedia({ media: "screen" });
     await expect(page.locator("a.download")).toBeVisible();
   });
 
