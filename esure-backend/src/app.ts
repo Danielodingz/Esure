@@ -39,7 +39,7 @@ const IDEMPOTENCY_MAX_ENTRIES = 1_000;
  */
 const IDEMPOTENCY_RETENTION_MS = 86_400_000;
 
-export function buildApp(options: BuildAppOptions): FastifyInstance {
+export function buildApp(options: BuildAppOptions): AppInstance {
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
   app.addContentTypeParser(["application/yaml", "application/x-yaml", "text/yaml"], { parseAs: "string" }, (_request, body, done) => done(null, body));
   const registry = createScenarioRegistry(options.config.scenarioDirectory);
