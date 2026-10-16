@@ -89,24 +89,50 @@ function parseCliArgs(): {
   args: string[];
   options: CliOptions;
   failFast: boolean;
+  parseError?: string;
 } {
-  const { values, positionals } = parseArgs({
-    options: {
-      output: { type: "string" },
-      help: { type: "boolean", short: "h" },
-      version: { type: "boolean", short: "v" },
-      ascii: { type: "boolean" },
-      "fail-fast": { type: "boolean" },
-    },
-    allowPositionals: true,
-    strict: false,
-  });
+  let values: Record<string, string | boolean | undefined>;
+  let positionals: string[];
+
+  try {
+    const parsed = parseArgs({
+      options: {
+        output: { type: "string" },
+        help: { type: "boolean", short: "h" },
+        version: { type: "boolean", short: "v" },
+        ascii: { type: "boolean" },
+        "fail-fast": { type: "boolean" },
+      },
+      allowPositionals: true,
+      strict: true,
+    });
+    values = parsed.values;
+    positionals = parsed.positionals;
+  } catch (err: any) {
+    return {
+      command: undefined,
+      args: [],
+      options: { output: "human", help: false, version: false, ascii: false },
+      failFast: false,
+      parseError: err.message || "Invalid arguments",
+    };
+  }
+
+  if (values.output !== undefined && values.output !== "human" && values.output !== "json") {
+    return {
+      command: positionals[0],
+      args: positionals.slice(1),
+      options: { output: "human", help: false, version: false, ascii: false },
+      failFast: false,
+      parseError: `Invalid output format "${values.output}". Supported formats: human, json`,
+    };
+  }
 
   return {
     command: positionals[0],
     args: positionals.slice(1),
     options: {
-      output: values.output === "json" ? "json" : "human",
+      output: (values.output as "human" | "json") || "human",
       help: Boolean(values.help),
       version: Boolean(values.version),
       ascii: Boolean(values.ascii),
@@ -526,7 +552,12 @@ async function runSuiteCommand(
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<number> {
-  const { command, args, options, failFast } = parseCliArgs();
+  const { command, args, options, failFast, parseError } = parseCliArgs();
+
+  if (parseError) {
+    console.error(`Error: ${parseError}`);
+    return 1;
+  }
 
   if (options.version) {
     showVersion();
