@@ -19,7 +19,13 @@ import type {
   StepResult,
   ValidatedScenario,
 } from "./domain.js";
-import { SafeRunError, StepTimeoutError, withTimeout } from "./errors.js";
+import {
+  friendbotTimeoutError,
+  horizonTimeoutError,
+  SafeRunError,
+  StepTimeoutError,
+  withTimeout,
+} from "./errors.js";
 import { interpretOperationCode, interpretTransactionCode, isStellarErrorRetryable } from "./stellar-error-interpreter.js";
 
 export type { FriendbotRetryConfig };
@@ -308,6 +314,7 @@ export class StellarTestnetGateway implements LedgerGateway {
       } catch (error) {
         if (signal?.aborted) throw error;
         if (attempt >= retryConfig.maxAttempts) {
+          if (isTimeoutError(error)) throw friendbotTimeoutError("fund-accounts");
           throw new SafeRunError({
             code: "FRIENDBOT_UNAVAILABLE",
             message: "Friendbot could not be reached.",
@@ -327,6 +334,9 @@ export class StellarTestnetGateway implements LedgerGateway {
 
       const isRetryable = response.status === 429 || response.status >= 500;
       if (!isRetryable || attempt >= retryConfig.maxAttempts) {
+        if (response.status === 408 || response.status === 504) {
+          throw friendbotTimeoutError("fund-accounts");
+        }
         throw new SafeRunError({
           code: "FRIENDBOT_UNAVAILABLE",
           message: `Friendbot rejected the funding request with HTTP ${response.status}.`,
@@ -353,12 +363,13 @@ export class StellarTestnetGateway implements LedgerGateway {
     ReturnType<typeof Operation.pathPaymentStrictReceive> |
     ReturnType<typeof Operation.pathPaymentStrictSend>
   >) {
-    const account = await this.withHorizonRetry(() => this.#server.loadAccount(source.publicKey()));
-    const builder = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, timebounds: await this.#server.fetchTimebounds(60) });
+    const account = await this.withHorizonRetry(() => this.#server.loadAccount(source.publicKey()), "account loading");
+    const timebounds = await this.withHorizonRetry(() => this.#server.fetchTimebounds(60), "transaction submission");
+    const builder = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, timebounds });
     for (const operation of operations) builder.addOperation(operation);
     const transaction = builder.build();
     transaction.sign(source);
-    return this.withHorizonRetry(() => this.#server.submitTransaction(transaction));
+    return this.withHorizonRetry(() => this.#server.submitTransaction(transaction), "transaction submission");
   }
 
   private async readBalanceOrZero(publicKey: string, asset: Asset, options: LedgerExecutionOptions, stepId: string): Promise<string> {
@@ -373,7 +384,7 @@ export class StellarTestnetGateway implements LedgerGateway {
   }
 
   private async balance(publicKey: string, asset: Asset): Promise<string> {
-    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey));
+    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading");
     const found = account.balances.find((balance) => asset.isNative()
       ? balance.asset_type === "native"
       : "asset_code" in balance && balance.asset_code === asset.getCode() && "asset_issuer" in balance && balance.asset_issuer === asset.getIssuer());
@@ -381,16 +392,19 @@ export class StellarTestnetGateway implements LedgerGateway {
   }
 
   private async accountExists(publicKey: string): Promise<boolean> {
-    try { await this.withHorizonRetry(() => this.#server.loadAccount(publicKey)); return true; }
+    try { await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading"); return true; }
     catch (error) { if (isNotFound(error)) return false; throw error; }
   }
 
   private async trustlineExists(publicKey: string, asset: Asset): Promise<boolean> {
-    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey));
+    const account = await this.withHorizonRetry(() => this.#server.loadAccount(publicKey), "account loading");
     return account.balances.some((balance) => "asset_code" in balance && balance.asset_code === asset.getCode() && "asset_issuer" in balance && balance.asset_issuer === asset.getIssuer());
   }
 
-  private async withHorizonRetry<T>(operation: () => Promise<T>): Promise<T> {
+  private async withHorizonRetry<T>(
+    operation: () => Promise<T>,
+    request: "transaction submission" | "account loading",
+  ): Promise<T> {
     const config = {
       maxRetries: Math.max(0, this.#options.horizonRetry?.maxRetries ?? DEFAULT_HORIZON_RETRY_CONFIG.maxRetries),
       baseDelayMs: this.#options.horizonRetry?.baseDelayMs ?? DEFAULT_HORIZON_RETRY_CONFIG.baseDelayMs,
@@ -405,8 +419,12 @@ export class StellarTestnetGateway implements LedgerGateway {
       try {
         return await operation();
       } catch (error) {
-        if (!isRetryableHorizonError(error)) throw error;
+        if (!isRetryableHorizonError(error)) {
+          if (isTimeoutError(error)) throw horizonTimeoutError(request);
+          throw error;
+        }
         if (retries >= config.maxRetries) {
+          if (isTimeoutError(error)) throw horizonTimeoutError(request);
           throw new SafeRunError({
             code: "HORIZON_UNAVAILABLE",
             message: `Horizon request failed after ${retries} retries.`,
@@ -492,6 +510,19 @@ function failureCode(transaction?: string, operations?: string[]): string { retu
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
 function safeCode(value: unknown): string | undefined { return typeof value === "string" && /^[a-z0-9_]{1,64}$/.test(value) ? value : undefined; }
 function isNotFound(error: unknown): boolean { return isRecord(error) && isRecord(error.response) && error.response.status === 404; }
+function isTimeoutError(error: unknown): boolean {
+  if (!isRecord(error)) return false;
+  const response = isRecord(error.response) ? error.response : undefined;
+  if (response?.status === 408 || response?.status === 504) return true;
+  const code = typeof error.code === "string" ? error.code.toUpperCase() : "";
+  const name = typeof error.name === "string" ? error.name.toLowerCase() : "";
+  const message = typeof error.message === "string" ? error.message.toLowerCase() : "";
+  return ["ECONNABORTED", "ETIMEDOUT", "ESOCKETTIMEDOUT"].includes(code)
+    || name === "timeouterror"
+    || name === "aborterror"
+    || message.includes("timeout")
+    || message.includes("timed out");
+}
 function isRetryableHorizonError(error: unknown): boolean {
   if (!isRecord(error)) return false;
   const response = isRecord(error.response) ? error.response : undefined;

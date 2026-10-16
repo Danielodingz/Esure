@@ -414,10 +414,50 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
 
       await expect(gateway.execute(accountScenario)).rejects.toMatchObject({
         name: "SafeRunError",
-        message: "Horizon request failed after 3 retries.",
+        report: {
+          code: "HORIZON_UNAVAILABLE",
+          message: "Horizon account loading timed out. This may be a temporary Testnet issue. Try again.",
+          category: "network",
+          retryable: true,
+        },
       });
       expect(loadAccount).toHaveBeenCalledTimes(4);
       expect(sleep.mock.calls.map(([delay]) => delay)).toEqual([1_000, 2_000, 4_000]);
+    });
+
+    it("reports a service-specific timeout when Horizon transaction submission times out", async () => {
+      vi.spyOn(Horizon.Server.prototype, "loadAccount")
+        .mockImplementation(async (publicKey) => mockAccount(publicKey));
+      vi.spyOn(Horizon.Server.prototype, "fetchTimebounds").mockImplementation(async () => ({
+        minTime: Math.floor(Date.now() / 1_000),
+        maxTime: Math.floor(Date.now() / 1_000) + 60,
+      }));
+      vi.spyOn(Horizon.Server.prototype, "submitTransaction")
+        .mockRejectedValue(Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" }));
+      const gateway = new StellarTestnetGateway("https://horizon.example", "https://friendbot.example", {
+        horizonRetry: { maxRetries: 0 },
+      });
+      const scenario: ValidatedScenario = {
+        ...accountScenario,
+        id: "horizon-submit-timeout",
+        accounts: [
+          { id: "alice", generate: true, fund: false },
+          { id: "bob", generate: true, fund: false },
+        ],
+        assets: [{ id: "xlm", type: "native" }],
+        steps: [{ id: "payment", type: "payment", from: "alice", to: "bob", asset: "xlm", amount: "1" }],
+        assertions: [],
+      };
+
+      await expect(gateway.execute(scenario)).rejects.toMatchObject({
+        report: {
+          code: "HORIZON_UNAVAILABLE",
+          message: "Horizon transaction submission timed out. This may be a temporary Testnet issue. Try again.",
+          category: "network",
+          retryable: true,
+          failedStepId: "payment",
+        },
+      });
     });
   });
   afterEach(() => {
@@ -600,6 +640,31 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
     expect(JSON.stringify((error as SafeRunError).report)).not.toContain("socket hang up");
   });
 
+  it("reports a service-specific timeout when Friendbot does not respond in time", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockRejectedValue(Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" }));
+    const gateway = new StellarTestnetGateway(
+      "https://horizon-testnet.stellar.org",
+      "https://friendbot.stellar.org",
+      {
+        fetch: fetchMock,
+        sleep: async () => {},
+        friendbotRetry: { maxAttempts: 2 },
+      },
+    );
+
+    await expect(gateway.fundAccount(publicKey)).rejects.toMatchObject({
+      report: {
+        code: "FRIENDBOT_UNAVAILABLE",
+        message: "Friendbot did not respond in time. This may be a temporary Testnet issue. Try again.",
+        category: "network",
+        retryable: true,
+        failedStepId: "fund-accounts",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("stops retries immediately when abort signal triggers during backoff delay", async () => {
     const controller = new AbortController();
     const fetchMock = vi
@@ -727,7 +792,7 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
     expect(error).toBeInstanceOf(SafeRunError);
     expect((error as SafeRunError).report).toMatchObject({
       code: "FRIENDBOT_UNAVAILABLE",
-      message: "Friendbot rejected the funding request with HTTP 504.",
+      message: "Friendbot did not respond in time. This may be a temporary Testnet issue. Try again.",
       failedStepId: "fund-accounts",
       retryable: true,
     });
@@ -736,7 +801,7 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
         id: "fund-accounts",
         type: "fundAccounts",
         status: "failed",
-        message: "Friendbot rejected the funding request with HTTP 504.",
+        message: "Friendbot did not respond in time. This may be a temporary Testnet issue. Try again.",
       },
     ]);
   });
