@@ -85,6 +85,10 @@ export function getRun(runId: string, signal?: AbortSignal): Promise<RunReport> 
   return request(`/api/backend/api/v1/runs/${encodeURIComponent(runId)}`, { signal }, isRunReport);
 }
 
+export function downloadReport(runId: string, signal?: AbortSignal): Promise<RunReport> {
+  return request(`/api/backend/api/v1/runs/${encodeURIComponent(runId)}/report`, { signal }, isRunReport);
+}
+
 const invalidResponseMessage = "The server returned an invalid response. Please try again.";
 
 async function request<T>(url: string, init: RequestInit | undefined, validate: (data: unknown) => data is T): Promise<T> {

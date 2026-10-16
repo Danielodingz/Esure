@@ -239,3 +239,100 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
 .inline-clear { background:none; border:none; color:var(--deep); font:600 14px var(--font-sans),sans-serif; text-decoration:underline; cursor:pointer; padding:0; }
 .inline-clear:hover { color:var(--ink); }
 .inline-clear:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
+
+/* ── Skip link (#44) ─────────────────────────────────────────────────────── */
+.skip-link {
+  position: absolute;
+  top: -9999px;
+  left: 16px;
+  background: var(--deep);
+  color: var(--paper);
+  padding: 10px 16px;
+  font: 600 12px var(--font-mono);
+  letter-spacing: .05em;
+  text-decoration: none;
+  border-radius: 4px;
+  z-index: 9999;
+  outline: 2px solid var(--paper);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.skip-link:focus,
+.skip-link:focus-visible {
+  top: 16px;
+}
+
+/* ── Report download feedback (#45) ───────────────────────────────────────── */
+button.download {
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+button.download:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+button.download:focus-visible {
+  outline: 2px solid var(--deep);
+  outline-offset: 2px;
+}
+.download-error {
+  margin: 10px 0 0;
+  color: var(--red);
+  font: 500 12px var(--font-sans);
+  line-height: 1.4;
+}
+
+/* ── Small-screen layout fixes (#43) ──────────────────────────────────────── */
+@media (max-width: 480px) {
+  .report-meta {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .id-cell {
+    flex-wrap: wrap;
+    word-break: break-all;
+    min-width: 0;
+  }
+  .id-cell code {
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    white-space: normal;
+  }
+  .tx-actions {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .tx-actions a, .tx-actions .copy-button {
+    max-width: 100%;
+    word-break: break-all;
+  }
+  .timeline-row {
+    grid-template-columns: 24px minmax(0, 1fr);
+    padding: 16px 12px;
+  }
+  .report-grid, .timeline-card, .summary-card {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+}
+@media (max-width: 320px) {
+  .shell {
+    padding-inline: 12px;
+  }
+  .timeline-row p, .timeline-row strong, .assertion strong {
+    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+  .report-meta code {
+    font-size: 9px;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+  }
+}
+

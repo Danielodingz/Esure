@@ -2,18 +2,24 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { ApiError, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
+import { ApiError, downloadReport, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed"]);
 
 export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
 export type SortOrder = "name-asc" | "name-desc" | "id-asc";
+export type ReportFilter = "all" | "failed";
 
 export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "xlm", label: "XLM" },
   { key: "issued-asset", label: "Issued Asset" },
   { key: "expected-failure", label: "Expected Failure" },
+];
+
+export const REPORT_FILTER_OPTIONS: { key: ReportFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "failed", label: "Failed" },
 ];
 
 export const SORT_OPTIONS: { key: SortOrder; label: string }[] = [
@@ -69,6 +75,7 @@ export function Dashboard() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [run, setRun] = useState<RunReport | null>(null);
+  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -311,6 +318,20 @@ export function Dashboard() {
 
   return (
     <main>
+      <a
+        href="#main-content"
+        className="skip-link"
+        onClick={(e) => {
+          e.preventDefault();
+          const target = document.getElementById("main-content");
+          if (target) {
+            target.focus();
+            target.scrollIntoView?.();
+          }
+        }}
+      >
+        Skip to main content
+      </a>
       <header className="topbar shell">
         <a className="brand" href="#top" aria-label="Esure home">
           <img className="brand-mark" src="/esure-mark.svg" width="38" height="38" alt="" aria-hidden="true" />
@@ -343,7 +364,7 @@ export function Dashboard() {
         </div>
       </section>
 
-      <section className="workspace shell">
+      <section className="workspace shell" id="main-content" tabIndex={-1}>
         <div className="section-heading">
           <div><p className="eyebrow">01 / CHOOSE A FLOW</p><h2>Test scenarios</h2></div>
           <span className="scenario-count">{filteredScenarios.length.toString().padStart(2, "0")} AVAILABLE</span>
@@ -533,10 +554,64 @@ export function Dashboard() {
 }
 
 function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFilter: ReportFilter; scenarioName: string }) {
-  const pending = !terminalStatuses.has(run.status);
+  const isTerminal = terminalStatuses.has(run.status);
+  const [now, setNow] = useState(() => Date.now());
+  const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isTerminal) return;
+    const interval = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isTerminal, run.id]);
+
   const createdLabel = formatLocaleDateTime(run.createdAt);
   const completedLabel = run.completedAt ? formatLocaleDateTime(run.completedAt) : null;
-  const durationLabel = run.completedAt ? computeDuration(run.createdAt, run.completedAt) : null;
+  const durationLabel = run.completedAt
+    ? computeDuration(run.createdAt, run.completedAt)
+    : isTerminal
+    ? (computeDuration(run.createdAt, run.createdAt) || "0s")
+    : formatElapsed(run.createdAt, now);
+
+  const handleDownload = async () => {
+    if (downloading) return;
+    setDownloading(true);
+    setDownloadError(null);
+    try {
+      const report = await downloadReport(run.id);
+      const jsonStr = JSON.stringify(report, null, 2);
+      const blob = new Blob([jsonStr], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `esure-run-${run.id}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        if (err.status === 404) {
+          setDownloadError("Report expired or not found. Please run the scenario again.");
+        } else if (err.status === 409) {
+          setDownloadError("Report is not complete yet. Please wait for the run to finish.");
+        } else if (err.status === 503) {
+          setDownloadError("Backend service is temporarily unavailable. Please try again shortly.");
+        } else {
+          setDownloadError(err.message || "Failed to download report.");
+        }
+      } else if (err instanceof Error) {
+        setDownloadError(err.message);
+      } else {
+        setDownloadError("An unexpected error occurred while downloading the report.");
+      }
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   const visibleSteps = run.steps
     .map((step, index) => ({ step, index }))
     .filter(({ step }) => reportFilter === "all" || step.status === "failed");
@@ -564,9 +639,9 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
           <span>NETWORK</span><code>{run.network}</code>
           <span>CREATED</span><code title={run.createdAt}>{createdLabel}</code>
           {completedLabel ? <><span>COMPLETED</span><code title={run.completedAt}>{completedLabel}</code></> : null}
-          {durationLabel ? <><span>DURATION</span><code>{durationLabel}</code></> : null}
+          {durationLabel ? <><span>DURATION</span><code aria-live="off" data-testid="run-duration">{durationLabel}</code></> : null}
         </div>
-        {pending && <div className="running-row"><span className="spinner" /><div><strong>{titleCase(run.status)}</strong><span>Esure is executing this flow on Stellar Testnet.</span></div></div>}
+        {!isTerminal && <div className="running-row"><span className="spinner" /><div><strong>{titleCase(run.status)}</strong><span>Esure is executing this flow on Stellar Testnet.</span></div></div>}
         {reportFilter === "failed" && visibleSteps.length === 0 && visibleAssertions.length === 0 && (
           <div className="empty-checks" role="status">
             <strong>No failed checks</strong>
@@ -598,7 +673,11 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
           </div>
         ))}
         {run.assertions.map((assertion, index) => (
-          <AssertionRow key={`${assertion.type}-${index}`} assertion={assertion} />
+          <AssertionRow
+            key={`${assertion.type}-${index}`}
+            assertion={assertion}
+            hidden={reportFilter === "failed" && assertion.status !== "failed"}
+          />
         ))}
         {run.error && <div className="run-error"><WarningIcon /><div><strong>{run.error.code}</strong><span>{run.error.message}</span></div></div>}
       </div>
@@ -606,20 +685,38 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
         <p className="eyebrow">RUN SUMMARY</p>
         <div className="score"><strong>{run.summary.stepsPassed + run.summary.assertionsPassed}</strong><span>checks passed</span></div>
         <dl><div><dt>Steps passed</dt><dd>{run.summary.stepsPassed}</dd></div><div><dt>Steps failed</dt><dd>{run.summary.stepsFailed}</dd></div><div><dt>Assertions passed</dt><dd>{run.summary.assertionsPassed}</dd></div><div><dt>Assertions failed</dt><dd>{run.summary.assertionsFailed}</dd></div></dl>
-        {terminalStatuses.has(run.status) && <a className="download" href={`/api/backend/api/v1/runs/${run.id}/report`} download>Download JSON report <DownloadIcon /></a>}
+        {isTerminal && (
+          <>
+            <button
+              type="button"
+              className="download"
+              disabled={downloading}
+              aria-busy={downloading}
+              onClick={handleDownload}
+            >
+              <span>{downloading ? "Downloading report…" : "Download JSON report"}</span>
+              <DownloadIcon />
+            </button>
+            {downloadError && (
+              <p className="download-error" role="alert" data-testid="download-error">
+                {downloadError}
+              </p>
+            )}
+          </>
+        )}
       </aside>
     </div>
   );
 }
 
 // #34 — Expandable assertion row with expected / actual values
-function AssertionRow({ assertion }: { assertion: import("@/lib/api").AssertionResult }) {
+function AssertionRow({ assertion, hidden }: { assertion: import("@/lib/api").AssertionResult; hidden?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const hasDiff = assertion.expected !== undefined || assertion.actual !== undefined;
   const isFailed = assertion.status === "failed";
 
   return (
-    <div className={`assertion ${isFailed && hasDiff ? "assertion--has-diff" : ""}`}>
+    <div className={`assertion report-row ${isFailed && hasDiff ? "assertion--has-diff" : ""}`} hidden={hidden}>
       <span className={`step-dot ${assertion.status}`}><CheckIcon /></span>
       <div className="assertion-body">
         <span className="label">ASSERTION / {assertion.type}</span>
@@ -764,10 +861,20 @@ function formatLocaleDateTime(iso: string): string {
   }
 }
 
-function computeDuration(startIso: string, endIso: string): string {
+export function formatElapsed(startIso: string, nowMs: number): string {
+  const start = new Date(startIso).getTime();
+  if (!Number.isFinite(start) || start > nowMs) return "0s";
+  const seconds = Math.max(0, Math.floor((nowMs - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return `${minutes}m ${remainingSeconds}s`;
+}
+
+export function computeDuration(startIso: string, endIso: string): string {
   const start = new Date(startIso).getTime();
   const end = new Date(endIso).getTime();
-  if (!Number.isFinite(start) || !Number.isFinite(end)) return "";
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) return "0s";
   const seconds = Math.max(0, Math.round((end - start) / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
