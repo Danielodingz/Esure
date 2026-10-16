@@ -15,6 +15,13 @@ export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "expected-failure", label: "Expected Failure" },
 ];
 
+type ReportFilter = "all" | "failed";
+
+const REPORT_FILTER_OPTIONS: { key: ReportFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "failed", label: "Failed" },
+];
+
 export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter): boolean {
   if (filter === "all") return true;
   const text = `${scenario.id} ${scenario.name} ${scenario.description}`.toLowerCase();
@@ -27,6 +34,7 @@ export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter
 export function Dashboard() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
   const [filter, setFilter] = useState<ScenarioFilter>("all");
+  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
   const [selectedId, setSelectedId] = useState<string>("");
   const [run, setRun] = useState<RunReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -129,20 +137,32 @@ export function Dashboard() {
     if (!run || terminalStatuses.has(run.status)) return;
     if (consecutiveFailures >= 5) return; // Exhausted retries
 
+    const activeRunId = run.id;
     let active = true;
-    const controller = new AbortController();
     let timerId: number | null = null;
+    let inFlightController: AbortController | null = null;
+    let requestVersion = 0;
+    let wasVisible = document.visibilityState !== "hidden";
 
     async function poll() {
-      if (!active) return;
+      if (!active || !wasVisible || inFlightController) return;
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+        timerId = null;
+      }
+
+      const currentRequestVersion = ++requestVersion;
+      const controller = new AbortController();
+      inFlightController = controller;
+
       try {
-        const updatedRun = await getRun(run!.id, controller.signal);
-        if (!active) return;
+        const updatedRun = await getRun(activeRunId, controller.signal);
+        if (!active || !wasVisible || currentRequestVersion !== requestVersion) return;
         setRun(updatedRun);
         setConsecutiveFailures(0);
         setPollingError(null);
       } catch (reason: unknown) {
-        if (!active) return;
+        if (!active || currentRequestVersion !== requestVersion) return;
         if (reason instanceof DOMException && reason.name === "AbortError") return;
 
         if (reason instanceof ApiError && reason.code === "RUN_NOT_FOUND") {
@@ -154,15 +174,47 @@ export function Dashboard() {
 
         setPollingError(readError(reason));
         setConsecutiveFailures((prev) => prev + 1);
+      } finally {
+        if (inFlightController === controller) inFlightController = null;
       }
     }
 
+    function schedule(delay: number) {
+      if (!active || !wasVisible) return;
+      timerId = window.setTimeout(() => {
+        timerId = null;
+        void poll();
+      }, delay);
+    }
+
+    function handleVisibilityChange() {
+      const visible = document.visibilityState !== "hidden";
+      if (visible === wasVisible) return;
+      wasVisible = visible;
+
+      if (!visible) {
+        if (timerId !== null) {
+          window.clearTimeout(timerId);
+          timerId = null;
+        }
+        requestVersion += 1;
+        inFlightController?.abort();
+        inFlightController = null;
+        return;
+      }
+
+      void poll();
+    }
+
     const delay = consecutiveFailures === 0 ? 1000 : Math.pow(2, consecutiveFailures - 1) * 1000;
-    timerId = window.setTimeout(poll, delay);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    schedule(delay);
 
     return () => {
       active = false;
-      controller.abort();
+      requestVersion += 1;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      inFlightController?.abort();
       if (timerId !== null) window.clearTimeout(timerId);
     };
   }, [run, consecutiveFailures]);
@@ -302,7 +354,29 @@ export function Dashboard() {
       <section className="results shell">
         <div className="section-heading">
           <div><p className="eyebrow">02 / INSPECT THE RUN</p><h2>Execution report</h2></div>
-          {run && <StatusBadge status={run.status} />}
+          {run && (
+            <div className="report-controls">
+              <div className="report-filters" role="group" aria-label="Report filter">
+                {REPORT_FILTER_OPTIONS.map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    aria-pressed={reportFilter === option.key}
+                    className={`filter-pill ${reportFilter === option.key ? "active" : ""}`}
+                    onClick={() => setReportFilter(option.key)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              {terminalStatuses.has(run.status) && (
+                <button type="button" className="print-button" onClick={() => window.print()}>
+                  Print report
+                </button>
+              )}
+              <StatusBadge status={run.status} />
+            </div>
+          )}
         </div>
         {!run ? (
           restoringRun ? (
@@ -323,7 +397,11 @@ export function Dashboard() {
             <EmptyReport />
           )
         ) : (
-          <RunView run={run} />
+          <RunView
+            run={run}
+            reportFilter={reportFilter}
+            scenarioName={scenarios.find((scenario) => scenario.id === run.scenarioId)?.name ?? run.scenarioId}
+          />
         )}
       </section>
 
@@ -332,15 +410,33 @@ export function Dashboard() {
   );
 }
 
-function RunView({ run }: { run: RunReport }) {
+function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFilter: ReportFilter; scenarioName: string }) {
   const pending = !terminalStatuses.has(run.status);
   const createdLabel = formatLocaleDateTime(run.createdAt);
   const completedLabel = run.completedAt ? formatLocaleDateTime(run.completedAt) : null;
   const durationLabel = run.completedAt ? computeDuration(run.createdAt, run.completedAt) : null;
+  const visibleSteps = run.steps
+    .map((step, index) => ({ step, index }))
+    .filter(({ step }) => reportFilter === "all" || step.status === "failed");
+  const visibleAssertions = run.assertions
+    .map((assertion, index) => ({ assertion, index }))
+    .filter(({ assertion }) => reportFilter === "all" || assertion.status === "failed");
 
   return (
     <div className="report-grid">
       <div className="timeline-card">
+        <div className="print-report-header">
+          <p className="eyebrow">ESURE / STELLAR TESTNET</p>
+          <h1>Execution report</h1>
+          <dl>
+            <div><dt>Scenario</dt><dd>{scenarioName}</dd></div>
+            <div><dt>Scenario ID</dt><dd>{run.scenarioId}</dd></div>
+            <div><dt>Scenario version</dt><dd>{run.scenarioVersion}</dd></div>
+            <div><dt>Schema version</dt><dd>{run.scenarioSchemaVersion}</dd></div>
+            <div><dt>Content hash</dt><dd>{run.scenarioContentHash}</dd></div>
+            <div><dt>Status</dt><dd>{titleCase(run.status)}</dd></div>
+          </dl>
+        </div>
         <div className="report-meta">
           <span>RUN ID</span><div className="id-cell"><code>{run.id}</code><CopyButton value={run.id} label="run ID" /></div>
           <span>NETWORK</span><code>{run.network}</code>
@@ -349,15 +445,45 @@ function RunView({ run }: { run: RunReport }) {
           {durationLabel ? <><span>DURATION</span><code>{durationLabel}</code></> : null}
         </div>
         {pending && <div className="running-row"><span className="spinner" /><div><strong>{titleCase(run.status)}</strong><span>Esure is executing this flow on Stellar Testnet.</span></div></div>}
+        {reportFilter === "failed" && visibleSteps.length === 0 && visibleAssertions.length === 0 && (
+          <div className="empty-checks" role="status">
+            <strong>No failed checks</strong>
+            <p>{run.error?.category === "timeout"
+              ? "The run timed out before any step or assertion was marked as failed."
+              : "No steps or assertions are currently marked as failed."}</p>
+          </div>
+        )}
         {run.steps.map((step, index) => (
-          <div className="timeline-row" key={step.id}>
+          <div
+            className="timeline-row report-row"
+            key={step.id}
+            hidden={reportFilter === "failed" && step.status !== "failed"}
+          >
             <span className={`step-dot ${step.status}`}><CheckIcon /></span>
-            <div><span className="label">STEP {String(index + 1).padStart(2, "0")} / {step.type}</span><strong>{humanize(step.id)}</strong><p>{step.message}</p>{step.transactionHash && <div className="tx-actions"><a href={`https://stellar.expert/explorer/testnet/tx/${step.transactionHash}`} target="_blank" rel="noreferrer">View transaction <ArrowIcon /></a><CopyButton value={step.transactionHash} label={`transaction ${step.transactionHash}`} /></div>}</div>
+            <div>
+              <span className="label">STEP {String(index + 1).padStart(2, "0")} / {step.type}</span>
+              <span className="print-status-label">{titleCase(step.status)}</span>
+              <strong>{humanize(step.id)}</strong><p>{step.message}</p>
+              {step.transactionHash && (
+                <div className="tx-actions">
+                  <a href={`https://stellar.expert/explorer/testnet/tx/${step.transactionHash}`} target="_blank" rel="noreferrer">View transaction <ArrowIcon /></a>
+                  <CopyButton value={step.transactionHash} label={`transaction ${step.transactionHash}`} />
+                  <code className="transaction-hash print-only">{step.transactionHash}</code>
+                </div>
+              )}
+            </div>
             {step.ledger && <code className="ledger">L#{step.ledger}</code>}
           </div>
         ))}
         {run.assertions.map((assertion, index) => (
-          <div className="assertion" key={`${assertion.type}-${index}`}><span className={`step-dot ${assertion.status}`}><CheckIcon /></span><div><span className="label">ASSERTION / {assertion.type}</span><strong>{assertion.message}</strong></div></div>
+          <div
+            className="assertion report-row"
+            key={`${assertion.type}-${index}`}
+            hidden={reportFilter === "failed" && assertion.status !== "failed"}
+          >
+            <span className={`step-dot ${assertion.status}`}><CheckIcon /></span>
+            <div><span className="label">ASSERTION / {assertion.type}</span><span className="print-status-label">{titleCase(assertion.status)}</span><strong>{assertion.message}</strong></div>
+          </div>
         ))}
         {run.error && <div className="run-error"><WarningIcon /><div><strong>{run.error.code}</strong><span>{run.error.message}</span></div></div>}
       </div>
@@ -444,6 +570,3 @@ function computeDuration(startIso: string, endIso: string): string {
   const remainingSeconds = seconds % 60;
   return `${minutes}m ${remainingSeconds}s`;
 }
-
-
-
