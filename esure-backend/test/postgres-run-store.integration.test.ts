@@ -165,7 +165,7 @@ function report(overrides: Partial<RunReport> = {}): RunReport {
 function databaseConfig(databaseUrl: string): AppConfig {
   return {
     host: "127.0.0.1", port: 3001, logLevel: "silent", horizonUrl: "https://horizon-testnet.stellar.org", friendbotUrl: "https://friendbot.stellar.org",
-    runTimeoutMs: 5_000, stepTimeoutMs: 1_000, maxConcurrentRuns: 2, maxStoredRuns: 100, runRetentionMs: 60_000,
+    runTimeoutMs: 5_000, stepTimeoutMs: 1_000, maxConcurrentRuns: 2, maxConcurrentFriendbotRequests: 5, maxStoredRuns: 100, runRetentionMs: 60_000,
     rateLimitMax: 100, runRateLimitMax: 50, rateLimitWindowMs: 60_000, bodyLimitBytes: 16_384,
     persistenceMode: "published", runPersistenceEnabled: true, databaseUrl, databasePoolMax: 5, databaseConnectionTimeoutMs: 5_000, databaseQueryTimeoutMs: 5_000, databaseIdleTimeoutMs: 10_000,
   };

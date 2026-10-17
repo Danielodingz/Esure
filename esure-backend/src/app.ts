@@ -14,6 +14,7 @@ import { scenarioSchemaV1, ScenarioValidationError } from "./scenario-schema.js"
 import { createScenarioRegistry } from "./scenarios.js";
 import { StellarTestnetGateway } from "./stellar-gateway.js";
 import { PersistenceCoordinator } from "./persistence.js";
+import { ScenarioIntegrityError } from "./published-scenarios.js";
 import { IdempotencyStore } from "./idempotency-store.js";
 
 interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; }
@@ -39,7 +40,7 @@ const IDEMPOTENCY_MAX_ENTRIES = 1_000;
  */
 const IDEMPOTENCY_RETENTION_MS = 86_400_000;
 
-export function buildApp(options: BuildAppOptions): FastifyInstance {
+export function buildApp(options: BuildAppOptions): AppInstance {
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
   app.addContentTypeParser(["application/yaml", "application/x-yaml", "text/yaml"], { parseAs: "string" }, (_request, body, done) => done(null, body));
   const registry = createScenarioRegistry(options.config.scenarioDirectory);
@@ -63,7 +64,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     reply.header("x-ratelimit-limit", limit).header("x-ratelimit-remaining", result.remaining);
     if (!result.allowed) { reply.header("retry-after", result.retryAfterSeconds); return reply.code(429).send(apiError("RATE_LIMITED", "Request limit exceeded. Try again later.", request.id)); }
   });
-  const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl);
+  const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
+    fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
+  });
   const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
   });
@@ -216,6 +219,9 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof RunCapacityError) return reply.code(503).send({ error: { ...error.report, requestId: request.id, details: [] } });
     if (error instanceof DatabaseUnavailableError) return reply.code(503).send(apiError("DATABASE_UNAVAILABLE", "The persistent scenario catalogue is temporarily unavailable.", request.id));
+    // Issue #81: a persisted scenario row failed its integrity re-check. Respond with a
+    // sanitized availability error — never the underlying ScenarioIntegrityError detail.
+    if (error instanceof ScenarioIntegrityError) return reply.code(503).send(apiError("CATALOGUE_INTEGRITY_ERROR", "The published scenario catalogue is temporarily unavailable.", request.id));
     if (error instanceof ScenarioValidationError) return reply.code(400).send(apiError("INVALID_SCENARIO", error.message, request.id, error.issues));
     if (isInvalidJsonBodyError(error)) {
       if (isScenarioDefinitionPath(request.url)) {

@@ -62,6 +62,17 @@ export interface StepResult {
   stellarTransactionCode?: string;
   stellarOperationCodes?: string[];
   message: string;
+  /**
+   * Issue #83: step timing evidence. These fields are additive — older
+   * reports without them remain valid, and consumers must treat them as
+   * optional. `startedAt`/`completedAt` are ISO-8601 timestamps suitable for
+   * display; `durationMs` is derived from a monotonic clock
+   * (`performance.now()`) and is therefore safe to use for measuring
+   * elapsed time even if the system clock changes mid-run.
+   */
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
 }
 
 export type AssertionValue = string | boolean | number | null | Record<string, unknown> | unknown[];

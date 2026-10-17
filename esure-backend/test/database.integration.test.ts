@@ -6,8 +6,8 @@ import EmbeddedPostgres from "embedded-postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Database, runMigrations } from "../src/database.js";
 import { createScenarioRegistry } from "../src/scenarios.js";
-import { PublishedScenarioRepository, reconcileFixture } from "../src/published-scenarios.js";
-import { prepareScenario } from "../src/scenario-loader.js";
+import { PublishedScenarioRepository, reconcileFixture, ScenarioIntegrityError } from "../src/published-scenarios.js";
+import { contentHash, prepareScenario } from "../src/scenario-loader.js";
 import type { AppConfig } from "../src/config.js";
 import { buildApp } from "../src/app.js";
 
@@ -152,12 +152,130 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     const columns = await database.query<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_schema = 'public'");
     expect(columns.rows.map((row) => row.column_name)).not.toEqual(expect.arrayContaining(["secret_seed", "signed_xdr", "raw_error"]));
   });
+
+  // ── Issue #80: dry-run fixture reconciliation preview ────────────────────
+  describe("dry-run fixture reconciliation (issue #80)", () => {
+    it("predicts unchanged, new, and changed scenarios without writing anything, matching a subsequent real reconciliation", async () => {
+      const registry = createScenarioRegistry();
+      const repository = new PublishedScenarioRepository(database);
+
+      // A scenario already reconciled earlier in this suite ("xlm-payment")
+      // should preview as unchanged.
+      const beforeCount = (await database.query<{ count: string }>("SELECT count(*)::text AS count FROM scenario_versions")).rows[0]!.count;
+      const dryRun = await repository.dryRunReconcile(registry);
+      const afterCount = (await database.query<{ count: string }>("SELECT count(*)::text AS count FROM scenario_versions")).rows[0]!.count;
+
+      // Zero writes happened in dry-run mode.
+      expect(afterCount).toBe(beforeCount);
+
+      // xlm-payment's currently-published content was changed to a
+      // different description by an earlier test in this suite, so the
+      // bundled fixture (unchanged original description) now previews as
+      // "changed" relative to the published version — exactly what a real
+      // reconciliation run would also report.
+      const xlmEntry = dryRun.entries.find((entry) => entry.id === "xlm-payment");
+      const currentXlmHistory = await repository.history("xlm-payment", 1);
+      expect(xlmEntry).toMatchObject({
+        status: "changed",
+        currentVersion: currentXlmHistory.items[0]?.version,
+        proposedVersion: (currentXlmHistory.items[0]?.version ?? 0) + 1,
+      });
+
+      // Introduce a change to a fixture that has never been reconciled
+      // before, so dry-run should predict it as "new".
+      const fresh = prepareScenario({ ...withoutHash(registry.find("issued-asset-payment")!), id: "dry-run-new-scenario" });
+      const previewOfNew = (await repository.dryRunReconcile({ list: () => [fresh], find: () => fresh } as unknown as Parameters<typeof repository.dryRunReconcile>[0])).entries[0];
+      expect(previewOfNew).toMatchObject({ id: "dry-run-new-scenario", status: "new", proposedVersion: 1 });
+
+      // Changing an existing scenario's content should preview as "changed"
+      // with the correct proposed version, and running the real
+      // reconciliation afterward should produce exactly that version.
+      const original = registry.find("multi-operation-transaction")!;
+      const changed = prepareScenario({ ...withoutHash(original), description: `${original.description} dry-run preview` });
+      const changedRegistry = { list: () => [changed], find: () => changed } as unknown as Parameters<typeof repository.dryRunReconcile>[0];
+      const beforeChangeHistory = await repository.history("multi-operation-transaction", 20);
+      const expectedNextVersion = (beforeChangeHistory.items[0]?.version ?? 0) + 1;
+      const previewOfChanged = (await repository.dryRunReconcile(changedRegistry)).entries[0];
+      expect(previewOfChanged).toMatchObject({ id: "multi-operation-transaction", status: "changed", proposedVersion: expectedNextVersion });
+
+      await database.transaction((client) => reconcileFixture(client, changed));
+      const afterChangeHistory = await repository.history("multi-operation-transaction", 20);
+      expect(afterChangeHistory.items[0]?.version).toBe(expectedNextVersion);
+    });
+  });
+
+  // ── Issue #81: published scenario hash verification on retrieval ─────────
+  describe("published scenario integrity verification (issue #81)", () => {
+    it("returns the existing public shape unchanged for a valid stored row", async () => {
+      const repository = new PublishedScenarioRepository(database);
+      const scenario = await repository.latest("xlm-payment");
+      expect(scenario).toMatchObject({ id: "xlm-payment" });
+    });
+
+    it("rejects a row whose definition no longer matches its stored content hash with a sanitized error", async () => {
+      const repository = new PublishedScenarioRepository(database);
+      const row = await database.query<{ scenario_id: string; definition: Record<string, unknown> }>(
+        "SELECT sv.scenario_id, sv.definition FROM scenario_versions sv JOIN scenarios s ON s.id = sv.scenario_id WHERE s.public_slug = 'xlm-payment' ORDER BY sv.version_number DESC LIMIT 1",
+      );
+      const scenarioId = row.rows[0]!.scenario_id;
+      // Rows are immutable once written (see migrations), so a "definition
+      // changed after the hash was computed" inconsistency is simulated by
+      // inserting a new row with a hash that does not match its own
+      // definition — exactly what verifyIntegrity() must catch.
+      const tampered = { ...row.rows[0]!.definition, version: 9001, description: "tampered description that was never hashed" };
+      const unrelatedHash = `sha256:${"ab".repeat(32)}`;
+      await database.query(
+        `INSERT INTO scenario_versions(scenario_id, version_number, schema_version, content_hash, definition, source_format)
+         VALUES ($1, 9001, 1, $2, $3::jsonb, 'json')`,
+        [scenarioId, unrelatedHash, JSON.stringify(tampered)],
+      );
+      const error = await repository.version("xlm-payment", 9001).catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(ScenarioIntegrityError);
+      // The error must not leak any internal detail (hashes, row contents).
+      expect((error as Error).message).not.toContain(unrelatedHash);
+      expect((error as Error).message).not.toContain("tampered");
+    });
+
+    it("rejects a row whose stored version number does not match its definition's version field", async () => {
+      const repository = new PublishedScenarioRepository(database);
+      const row = await database.query<{ scenario_id: string; definition: Record<string, unknown> }>(
+        "SELECT sv.scenario_id, sv.definition FROM scenario_versions sv JOIN scenarios s ON s.id = sv.scenario_id WHERE s.public_slug = 'xlm-payment' ORDER BY sv.version_number DESC LIMIT 1",
+      );
+      const scenarioId = row.rows[0]!.scenario_id;
+      // The definition's own `version` field (9002) is internally
+      // consistent with its content hash, but the row is inserted under a
+      // different version_number column (9003) — an inconsistency that
+      // only the version check (not the hash check) can catch.
+      const definitionAtVersion9002 = { ...row.rows[0]!.definition, version: 9002 };
+      const hash = contentHash(definitionAtVersion9002 as never);
+      await database.query(
+        `INSERT INTO scenario_versions(scenario_id, version_number, schema_version, content_hash, definition, source_format)
+         VALUES ($1, 9003, 1, $2, $3::jsonb, 'json')`,
+        [scenarioId, hash, JSON.stringify(definitionAtVersion9002)],
+      );
+      await expect(repository.version("xlm-payment", 9003)).rejects.toBeInstanceOf(ScenarioIntegrityError);
+    });
+
+    it("rejects a row with an invalid schema", async () => {
+      const repository = new PublishedScenarioRepository(database);
+      const row = await database.query<{ scenario_id: string }>(
+        "SELECT sv.scenario_id FROM scenario_versions sv JOIN scenarios s ON s.id = sv.scenario_id WHERE s.public_slug = 'xlm-payment' ORDER BY sv.version_number DESC LIMIT 1",
+      );
+      const scenarioId = row.rows[0]!.scenario_id;
+      await database.query(
+        `INSERT INTO scenario_versions(scenario_id, version_number, schema_version, content_hash, definition, source_format)
+         VALUES ($1, 9004, 1, 'sha256:${"0".repeat(64)}', '{"not":"a scenario"}'::jsonb, 'json')`,
+        [scenarioId],
+      );
+      await expect(repository.version("xlm-payment", 9004)).rejects.toBeInstanceOf(ScenarioIntegrityError);
+    });
+  });
 });
 
 function databaseConfig(databaseUrl: string): AppConfig {
   return {
     host: "127.0.0.1", port: 3001, logLevel: "silent", horizonUrl: "https://horizon-testnet.stellar.org", friendbotUrl: "https://friendbot.stellar.org",
-    runTimeoutMs: 5_000, stepTimeoutMs: 1_000, maxConcurrentRuns: 2, maxStoredRuns: 100, runRetentionMs: 60_000,
+    runTimeoutMs: 5_000, stepTimeoutMs: 1_000, maxConcurrentRuns: 2, maxConcurrentFriendbotRequests: 5, maxStoredRuns: 100, runRetentionMs: 60_000,
     rateLimitMax: 100, runRateLimitMax: 50, rateLimitWindowMs: 60_000, bodyLimitBytes: 16_384,
     persistenceMode: "published", databaseUrl, databasePoolMax: 5, databaseConnectionTimeoutMs: 5_000, databaseQueryTimeoutMs: 5_000, databaseIdleTimeoutMs: 10_000,
     runPersistenceEnabled: false,

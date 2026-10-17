@@ -744,9 +744,12 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
     const result = await promise;
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(result.steps).toEqual([
+    expect(result.steps).toMatchObject([
       { id: "fund-accounts", type: "fundAccounts", status: "passed", message: "Test accounts funded." },
     ]);
+    expect(result.steps[0]).toHaveProperty("startedAt");
+    expect(result.steps[0]).toHaveProperty("completedAt");
+    expect(result.steps[0]?.durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it("fails the funding step and throws sanitized error when retries are exhausted during execution", async () => {
@@ -796,7 +799,7 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
       failedStepId: "fund-accounts",
       retryable: true,
     });
-    expect(recordedSteps).toEqual([
+    expect(recordedSteps).toMatchObject([
       {
         id: "fund-accounts",
         type: "fundAccounts",
@@ -804,5 +807,226 @@ describe("StellarTestnetGateway Friendbot bounded retry", () => {
         message: "Friendbot did not respond in time. This may be a temporary Testnet issue. Try again.",
       },
     ]);
+  });
+
+  describe("bounded funding concurrency (issue #82)", () => {
+    beforeEach(() => {
+      vi.useRealTimers();
+    });
+
+    function fundingScenario(accountCount: number): ValidatedScenario {
+      return {
+        schemaVersion: 1,
+        id: "funding-concurrency-scenario",
+        version: 1,
+        name: "Funding concurrency scenario",
+        description: "Verifies bounded concurrent Friendbot funding",
+        network: "testnet",
+        contentHash: "sha256:concurrency",
+        accounts: Array.from({ length: accountCount }, (_, index) => ({ id: `acct-${index}`, generate: true as const, fund: true })),
+        assets: [{ id: "xlm", type: "native" }],
+        steps: [],
+        assertions: [],
+      };
+    }
+
+    async function waitUntil(predicate: () => boolean, attempts = 100): Promise<void> {
+      for (let attempt = 0; attempt < attempts && !predicate(); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    }
+
+    it("never has more than the configured number of funding requests in flight", async () => {
+      let active = 0;
+      let peak = 0;
+      const releases: Array<() => void> = [];
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => {
+        active += 1;
+        peak = Math.max(peak, active);
+        return new Promise<Response>((resolve) => {
+          releases.push(() => {
+            active -= 1;
+            resolve(new Response(null, { status: 200 }));
+          });
+        });
+      });
+
+      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
+        fetch: fetchMock,
+        fundingConcurrency: 2,
+      });
+
+      const accountCount = 6;
+      const promise = gateway.execute(fundingScenario(accountCount));
+
+      await waitUntil(() => fetchMock.mock.calls.length >= 2);
+      // Only the concurrency limit's worth of requests should be in flight
+      // while none have completed yet.
+      expect(fetchMock.mock.calls.length).toBe(2);
+      expect(active).toBe(2);
+
+      // Release in-flight requests one at a time, giving the queue a chance
+      // to dequeue the next account after each release, until every
+      // account has been requested and every in-flight request has settled.
+      for (let guard = 0; guard < accountCount * 4; guard += 1) {
+        if (fetchMock.mock.calls.length >= accountCount && releases.length === 0) break;
+        if (releases.length > 0) releases.shift()!();
+        await waitUntil(() => releases.length > 0 || fetchMock.mock.calls.length >= accountCount);
+      }
+      releases.splice(0, releases.length).forEach((release) => release());
+
+      const result = await promise;
+      expect(fetchMock).toHaveBeenCalledTimes(accountCount);
+      expect(peak).toBeLessThanOrEqual(2);
+      expect(result.steps).toMatchObject([{ id: "fund-accounts", type: "fundAccounts", status: "passed" }]);
+    });
+
+    it("stops dequeuing additional accounts once the run is aborted", async () => {
+      const controller = new AbortController();
+      const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+        controller.abort(new Error("Run aborted by client"));
+        return new Response(null, { status: 200 });
+      });
+
+      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
+        fetch: fetchMock,
+        fundingConcurrency: 1,
+      });
+
+      await expect(gateway.execute(fundingScenario(4), { signal: controller.signal })).rejects.toThrow();
+      // The aborted worker returns after its first in-flight request; no
+      // further accounts should have been dequeued.
+      expect(fetchMock.mock.calls.length).toBeLessThan(4);
+    });
+
+    it("cancels sibling funding requests without an unhandled rejection when one fails", async () => {
+      const unhandledRejections: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandledRejections.push(reason);
+      process.on("unhandledRejection", onUnhandled);
+
+      try {
+        let call = 0;
+        const releases: Array<() => void> = [];
+        const fetchMock = vi.fn<typeof fetch>().mockImplementation(() => {
+          call += 1;
+          if (call === 1) return Promise.resolve(new Response(null, { status: 400 }));
+          return new Promise<Response>((resolve) => releases.push(() => resolve(new Response(null, { status: 200 }))));
+        });
+
+        const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
+          fetch: fetchMock,
+          fundingConcurrency: 3,
+          friendbotRetry: { maxAttempts: 1 },
+        });
+
+        const promise = gateway.execute(fundingScenario(5)).catch((error: unknown) => error);
+        // Let the first (failing) request settle and trigger cancellation,
+        // then release the other in-flight requests so their aborted
+        // fetches can resolve and the run can finish.
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        releases.splice(0, releases.length).forEach((release) => release());
+        const result = await promise;
+
+        expect(result).toBeInstanceOf(Error);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+      }
+      expect(unhandledRejections).toEqual([]);
+    });
+  });
+
+  describe("step timing evidence (issue #83)", () => {
+    beforeEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("records start/completion timestamps and monotonic duration for a successful step", async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 200 }));
+      let monotonic = 1_000;
+      const clock = {
+        monotonicNow: () => { monotonic += 50; return monotonic; },
+        isoNow: () => new Date(monotonic).toISOString(),
+      };
+      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
+        fetch: fetchMock,
+        clock,
+      });
+
+      const result = await gateway.execute(fundingScenarioFor("timing-success-scenario"));
+      expect(result.steps).toHaveLength(1);
+      const step = result.steps[0]!;
+      expect(step.startedAt).toBeDefined();
+      expect(step.completedAt).toBeDefined();
+      expect(step.durationMs).toBe(50);
+    });
+
+    it("records timing for a failed funding step", async () => {
+      const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 400 }));
+      let monotonic = 0;
+      const clock = {
+        monotonicNow: () => { monotonic += 25; return monotonic; },
+        isoNow: () => new Date(monotonic).toISOString(),
+      };
+      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", {
+        fetch: fetchMock,
+        clock,
+        friendbotRetry: { maxAttempts: 1 },
+      });
+
+      const error = await gateway.execute(fundingScenarioFor("timing-failure-scenario")).catch((err: unknown) => err);
+      expect(error).toBeInstanceOf(SafeRunError);
+    });
+
+    it("records timing for a step that times out, without waiting for a real delay", async () => {
+      vi.useFakeTimers();
+      let monotonic = 0;
+      const clock = {
+        monotonicNow: () => { monotonic += 10; return monotonic; },
+        isoNow: () => new Date(monotonic).toISOString(),
+      };
+      const neverResolves = () => new Promise<never>(() => {});
+      vi.spyOn(Horizon.Server.prototype, "loadAccount").mockImplementation(neverResolves as never);
+
+      const gateway = new StellarTestnetGateway("https://horizon-testnet.stellar.org", "https://friendbot.stellar.org", { clock });
+      const scenario: ValidatedScenario = {
+        schemaVersion: 1,
+        id: "timing-timeout-scenario",
+        version: 1,
+        name: "Timing timeout scenario",
+        description: "Verifies timing is recorded for a timed-out step",
+        network: "testnet",
+        contentHash: "sha256:timeout",
+        accounts: [
+          { id: "alice", generate: true, fund: false },
+          { id: "bob", generate: true, fund: false },
+        ],
+        assets: [{ id: "xlm", type: "native" }],
+        steps: [{ id: "payment", type: "payment", from: "alice", to: "bob", asset: "xlm", amount: "1" }],
+        assertions: [],
+      };
+
+      const promise = gateway.execute(scenario, { stepTimeoutMs: 1_000 }).catch((err: unknown) => err);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await promise;
+      expect(error).toBeInstanceOf(Error);
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    });
+
+    function fundingScenarioFor(id: string): ValidatedScenario {
+      return {
+        schemaVersion: 1,
+        id,
+        version: 1,
+        name: "Timing scenario",
+        description: "Verifies step timing evidence",
+        network: "testnet",
+        contentHash: "sha256:timing",
+        accounts: [{ id: "alice", generate: true, fund: true }],
+        assets: [{ id: "xlm", type: "native" }],
+        steps: [],
+        assertions: [],
+      };
+    }
   });
 });
