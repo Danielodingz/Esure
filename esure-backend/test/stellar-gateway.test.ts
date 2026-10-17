@@ -7,6 +7,7 @@ import {
   calculateRetryDelay,
   canonicalDecimal,
   isExpectedMissingTrustlineError,
+  matchesFailure,
   normalizeStellarError,
   signalSleep,
   StellarTestnetGateway,
@@ -54,6 +55,21 @@ describe("Stellar result-code normalization", () => {
       new Error("network timeout"),
     ]) {
       expect(isExpectedMissingTrustlineError(normalizeStellarError(error, "send-testusd"))).toBe(false);
+    }
+  });
+
+  it("matches the sender-side trustline failure exactly", () => {
+    const sourceFailure = normalizeStellarError(horizonError("tx_failed", ["op_src_no_trust"]), "send-testusd-without-trustline");
+    expect(matchesFailure(sourceFailure, "tx_failed", ["op_src_no_trust"])).toBe(true);
+    expect(isExpectedMissingTrustlineError(sourceFailure)).toBe(false);
+    expect(sourceFailure.report).toMatchObject({ stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_src_no_trust"] });
+
+    for (const error of [
+      horizonError("tx_failed", ["op_no_trust"]),
+      horizonError("tx_failed", ["op_underfunded"]),
+      horizonError("tx_failed", ["op_src_no_trust", "op_success"]),
+    ]) {
+      expect(matchesFailure(normalizeStellarError(error, "send-testusd-without-trustline"), "tx_failed", ["op_src_no_trust"])).toBe(false);
     }
   });
 

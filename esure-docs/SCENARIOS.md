@@ -13,6 +13,7 @@ ESURE includes 10 MVP scenarios for Testnet integration testing:
 | `xlm-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
 | `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
+| `sender-missing-trustline` | Attempt issued-asset payment from a funded, non-issuer sender without a trustline | Controlled `op_src_no_trust` failure |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
 | `payment-with-memo` | Send XLM with memo for transaction tracking | Pass |
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
@@ -25,6 +26,14 @@ ESURE includes 10 MVP scenarios for Testnet integration testing:
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers
 commonly need to test.
+
+`missing-trustline` and `sender-missing-trustline` fail on opposite sides of
+the same payment. In `missing-trustline` the recipient cannot hold the asset, so
+Stellar reports `op_no_trust`. In `sender-missing-trustline` the recipient has a
+trustline and an issued balance of 50 TESTUSD, while the XLM-funded sender has
+never trusted the asset, so Stellar reports `op_src_no_trust` and the
+recipient's balance stays at exactly 50. The sender is deliberately not the
+issuer: an issuer can always send its own asset without a trustline.
 
 `path-payment` provisions its own Testnet liquidity. It creates generated sender,
 market-maker, recipient, and issuer accounts, then submits trustlines, issues
