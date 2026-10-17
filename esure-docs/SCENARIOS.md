@@ -6,12 +6,13 @@ no executable code or credentials and are validated before Testnet access.
 
 ## Bundled Scenarios
 
-ESURE includes 10 MVP scenarios for Testnet integration testing:
+ESURE includes 12 bundled scenarios for Testnet integration testing:
 
 | Scenario ID | Purpose | Expected Result |
 | --- | --- | --- |
 | `xlm-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
 | `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
+| `issued-asset-holder-transfer` | Issue 100 TESTUSD to a sender, who transfers 40 to a second holder | Pass |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
 | `payment-with-memo` | Send XLM with memo for transaction tracking | Pass |
@@ -25,6 +26,12 @@ ESURE includes 10 MVP scenarios for Testnet integration testing:
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers
 commonly need to test.
+
+`issued-asset-holder-transfer` makes holder-to-holder transfer explicit. Both
+holders open a TESTUSD trustline, the issuer sends 100 TESTUSD to the sender,
+and the sender then pays 40 TESTUSD to the receiver. Issuance and the peer
+transfer are separate transactions, each checked with `transactionConfirmed`,
+and the exact final balances (60 and 40) are asserted for both holders.
 
 `path-payment` provisions its own Testnet liquidity. It creates generated sender,
 market-maker, recipient, and issuer accounts, then submits trustlines, issues
