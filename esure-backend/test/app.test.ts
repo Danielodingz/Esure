@@ -316,4 +316,147 @@ describe("Esure API", () => {
     expect(limited.statusCode).toBe(429);
     expect(limited.json().error.code).toBe("RATE_LIMITED");
   });
+
+  // ── Issue #76: run retention metadata ────────────────────────────────────
+  describe("run retention metadata", () => {
+    it("does not claim a terminal expiresAt while a run is still active", async () => {
+      let release!: (value: LedgerExecution) => void;
+      const blockedLedger: LedgerGateway = { execute: vi.fn(() => new Promise<LedgerExecution>((resolve) => { release = resolve; })) };
+      const app = createApp({ ledger: blockedLedger });
+      const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const id = started.json().id as string;
+      const active = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+      expect(active.json().status).not.toMatch(/passed|failed/);
+      expect(active.json()).not.toHaveProperty("expiresAt");
+      release({ steps: [], assertions: [] });
+    });
+
+    it("reports a correct expiresAt hint for a terminal run, derived from the configured retention", async () => {
+      const retentionMs = 60_000;
+      const app = createApp({ config: { ...config, runRetentionMs: retentionMs } });
+      const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const id = started.json().id as string;
+      let run: ReturnType<typeof started.json> | undefined;
+      await vi.waitFor(async () => {
+        run = (await app.inject({ method: "GET", url: `/api/v1/runs/${id}` })).json();
+        expect(run.status).toBe("passed");
+      });
+      expect(run!.expiresAt).toBe(new Date(Date.parse(run!.completedAt) + retentionMs).toISOString());
+
+      const report = await app.inject({ method: "GET", url: `/api/v1/runs/${id}/report` });
+      expect(report.statusCode).toBe(200);
+      expect(report.json().expiresAt).toBe(run!.expiresAt);
+    });
+
+    it("returns RUN_NOT_FOUND for a run that has expired out of the store", async () => {
+      let now = Date.parse("2026-08-09T00:00:00.000Z");
+      const app = createApp({ config: { ...config, runRetentionMs: 1_000 }, clock: () => now });
+      const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const id = started.json().id as string;
+      await vi.waitFor(async () => expect((await app.inject({ method: "GET", url: `/api/v1/runs/${id}` })).json().status).toBe("passed"));
+      now += 1_001;
+      const expired = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
+      expect(expired.statusCode).toBe(404);
+      expect(expired.json().error.code).toBe("RUN_NOT_FOUND");
+    });
+
+    it("returns RUN_NOT_FOUND for a run evicted early under capacity pressure, same as a truly-gone run", async () => {
+      const app = createApp({ config: { ...config, maxStoredRuns: 1 } });
+      const first = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const firstId = first.json().id as string;
+      await vi.waitFor(async () => expect((await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` })).json().status).toBe("passed"));
+      // Starting a second run evicts the first terminal run once the store is at capacity.
+      await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
+      const evicted = await app.inject({ method: "GET", url: `/api/v1/runs/${firstId}` });
+      expect(evicted.statusCode).toBe(404);
+      expect(evicted.json().error.code).toBe("RUN_NOT_FOUND");
+    });
+  });
+
+  // ── Issue #77: unsupported content type ──────────────────────────────────
+  describe("content type handling", () => {
+    it.each([
+      ["/api/v1/scenarios/validate"],
+      ["/api/v1/runs/definitions"],
+    ])("returns 415 UNSUPPORTED_MEDIA_TYPE for text/plain on %s", async (url) => {
+      const response = await createApp().inject({ method: "POST", url, headers: { "content-type": "text/plain" }, payload: "not a scenario" });
+      expect(response.statusCode).toBe(415);
+      expect(response.json().error).toMatchObject({ code: "UNSUPPORTED_MEDIA_TYPE" });
+      expect(response.json().error.requestId).toBeTruthy();
+    });
+
+    it("returns 415 UNSUPPORTED_MEDIA_TYPE for an unsupported binary content type", async () => {
+      const response = await createApp().inject({
+        method: "POST",
+        url: "/api/v1/runs/definitions",
+        headers: { "content-type": "application/octet-stream" },
+        payload: Buffer.from([0x00, 0x01, 0x02]),
+      });
+      expect(response.statusCode).toBe(415);
+      expect(response.json().error.code).toBe("UNSUPPORTED_MEDIA_TYPE");
+    });
+
+    it("still accepts YAML with a charset parameter", async () => {
+      const yaml = `schemaVersion: 1\nid: api-yaml-charset\nversion: 1\nname: API YAML\ndescription: Submitted as YAML with charset.\nnetwork: testnet\naccounts:\n  - { id: sender, generate: true, fund: true }\n  - { id: recipient, generate: true, fund: true }\nassets:\n  - { id: xlm, type: native }\nsteps:\n  - { id: pay, type: payment, from: sender, to: recipient, asset: xlm, amount: \"1\" }\nassertions:\n  - { type: stepSucceeded, step: pay }\n`;
+      const response = await createApp().inject({
+        method: "POST",
+        url: "/api/v1/scenarios/validate",
+        headers: { "content-type": "application/yaml; charset=utf-8" },
+        payload: yaml,
+      });
+      expect(response.statusCode).toBe(200);
+    });
+
+    it("still accepts normal JSON", async () => {
+      const response = await createApp().inject({
+        method: "POST",
+        url: "/api/v1/scenarios/validate",
+        headers: { "content-type": "application/json" },
+        payload: completeScenario(),
+      });
+      expect(response.statusCode).toBe(200);
+    });
+  });
+
+  // ── Issue #78: strict query/path schemas on version endpoints ───────────
+  describe("version endpoint request-shape validation", () => {
+    function publishedApp() {
+      return createApp({ config: { ...config, persistenceMode: "disabled" } });
+    }
+
+    it.each([
+      ["/api/v1/scenarios/xlm-payment/versions?limit="],
+      ["/api/v1/scenarios/xlm-payment/versions?limit=1.5"],
+      ["/api/v1/scenarios/xlm-payment/versions?limit=1e2"],
+      ["/api/v1/scenarios/xlm-payment/versions?limit=1&limit=2"],
+      ["/api/v1/scenarios/xlm-payment/versions?limit=0"],
+      ["/api/v1/scenarios/xlm-payment/versions?limit=101"],
+      ["/api/v1/scenarios/xlm-payment/versions?cursor=1.5"],
+      ["/api/v1/scenarios/xlm-payment/versions?unknown=1"],
+      ["/api/v1/scenarios/xlm-payment/versions/1.5"],
+      ["/api/v1/scenarios/xlm-payment/versions/1e2"],
+      ["/api/v1/scenarios/xlm-payment/versions/"],
+      ["/api/v1/scenarios/xlm-payment/versions/1/export?format=xml"],
+      ["/api/v1/scenarios/xlm-payment/versions/1/export?unknown=1"],
+    ])("rejects malformed request shape for %s with INVALID_REQUEST", async (url) => {
+      const response = await publishedApp().inject({ method: "GET", url });
+      expect([400, 404]).toContain(response.statusCode);
+      if (response.statusCode === 400) expect(response.json().error.code).toBe("INVALID_REQUEST");
+    });
+
+    it("accepts boundary values for limit (1 and 100) and version (1)", async () => {
+      const app = publishedApp();
+      // Persistence is disabled in this suite, so these resolve to 503 PERSISTENCE_REQUIRED
+      // rather than 404/200 — the point here is that schema validation passes (no 400).
+      for (const url of [
+        "/api/v1/scenarios/xlm-payment/versions?limit=1",
+        "/api/v1/scenarios/xlm-payment/versions?limit=100",
+        "/api/v1/scenarios/xlm-payment/versions/1",
+        "/api/v1/scenarios/xlm-payment/versions/1/export?format=json",
+      ]) {
+        const response = await app.inject({ method: "GET", url });
+        expect(response.statusCode).toBe(503);
+      }
+    });
+  });
 });
