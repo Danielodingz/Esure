@@ -70,6 +70,13 @@ const exportQuerySchema = {
 export function buildApp(options: BuildAppOptions): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
   app.addContentTypeParser(["application/yaml", "application/x-yaml", "text/yaml"], { parseAs: "string" }, (_request, body, done) => done(null, body));
+  // Issue #77: fastify's default text/plain parser would otherwise accept
+  // (and then fail validation on) bodies with unsupported content types such
+  // as text/plain, masking the real problem behind a 400. Removing it lets
+  // every content type we don't explicitly support fall through to fastify's
+  // own FST_ERR_CTP_INVALID_MEDIA_TYPE path, which the error handler below
+  // maps to a stable 415 UNSUPPORTED_MEDIA_TYPE.
+  app.removeContentTypeParser("text/plain");
   const registry = createScenarioRegistry(options.config.scenarioDirectory);
   const persistence = new PersistenceCoordinator(options.config, registry);
   app.addHook("onReady", async () => persistence.initialize());
@@ -98,7 +105,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   const clock = options.clock ?? Date.now;
   const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
-  });
+  }, clock);
 
   app.get("/health", async () => ({ status: "ok", network: "testnet" }));
   app.get("/ready", async (_request, reply) => {
@@ -133,7 +140,6 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     return scenario;
   });
   app.get<{ Params: { scenarioId: string }; Querystring: { limit?: string; cursor?: string } }>("/api/v1/scenarios/:scenarioId/versions", { schema: { params: scenarioIdParamsSchema, querystring: historyQuerySchema } }, async (request, reply) => {
-    if (!persistence.repository) return reply.code(503).send(apiError("PERSISTENCE_REQUIRED", "Scenario version history requires published persistence mode.", request.id));
     const limit = request.query.limit === undefined ? 20 : parseBoundedInt(request.query.limit, 1, 100);
     if (limit === undefined) return reply.code(400).send(apiError("INVALID_REQUEST", "limit must be an integer between 1 and 100.", request.id));
     let cursor: number | undefined;
@@ -141,22 +147,23 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       cursor = parseBoundedInt(request.query.cursor, 1, 2_147_483_647);
       if (cursor === undefined) return reply.code(400).send(apiError("INVALID_REQUEST", "cursor must be an integer between 1 and 2147483647.", request.id));
     }
+    if (!persistence.repository) return reply.code(503).send(apiError("PERSISTENCE_REQUIRED", "Scenario version history requires published persistence mode.", request.id));
     const history = await persistence.repository.history(request.params.scenarioId, limit, cursor);
     if (!history.items.length && cursor === undefined) return reply.code(404).send(apiError("SCENARIO_NOT_FOUND", "The requested scenario is not available.", request.id));
     return history;
   });
   app.get<{ Params: { scenarioId: string; version: string } }>("/api/v1/scenarios/:scenarioId/versions/:version", { schema: { params: versionParamsSchema } }, async (request, reply) => {
-    if (!persistence.repository) return reply.code(503).send(apiError("PERSISTENCE_REQUIRED", "Exact scenario versions require published persistence mode.", request.id));
     const version = parseBoundedInt(request.params.version, 1, 2_147_483_647);
     if (version === undefined) return reply.code(400).send(apiError("INVALID_REQUEST", "version must be an integer between 1 and 2147483647.", request.id));
+    if (!persistence.repository) return reply.code(503).send(apiError("PERSISTENCE_REQUIRED", "Exact scenario versions require published persistence mode.", request.id));
     const scenario = await persistence.repository.version(request.params.scenarioId, version);
     if (!scenario) return reply.code(404).send(apiError("SCENARIO_VERSION_NOT_FOUND", "The requested scenario version is not available.", request.id));
     return scenario;
   });
-  app.get<{ Params: { scenarioId: string; version: string }; Querystring: { format?: string } }>("/api/v1/scenarios/:scenarioId/versions/:version/export", { schema: { params: versionParamsSchema, querystring: exportQuerySchema } }, async (request, reply) => {
-    if (!persistence.repository) return reply.code(503).send(apiError("PERSISTENCE_REQUIRED", "Scenario export requires published persistence mode.", request.id));
+  app.get<{ Params: { scenarioId: string; version: string }; Querystring: { format?: "json" | "yaml" } }>("/api/v1/scenarios/:scenarioId/versions/:version/export", { schema: { params: versionParamsSchema, querystring: exportQuerySchema } }, async (request, reply) => {
     const version = parseBoundedInt(request.params.version, 1, 2_147_483_647);
     if (version === undefined) return reply.code(400).send(apiError("INVALID_REQUEST", "version must be an integer between 1 and 2147483647.", request.id));
+    if (!persistence.repository) return reply.code(503).send(apiError("PERSISTENCE_REQUIRED", "Scenario export requires published persistence mode.", request.id));
     const format = request.query.format ?? "json";
     const exported = await persistence.repository.export(request.params.scenarioId, version, format);
     if (!exported) return reply.code(404).send(apiError("SCENARIO_VERSION_NOT_FOUND", "The requested scenario version is not available.", request.id));

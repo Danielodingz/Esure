@@ -39,8 +39,8 @@ const ledger: LedgerGateway = {
 
 const apps: AppInstance[] = [];
 
-function createApp(options: { config?: AppConfig; ledger?: LedgerGateway } = {}) {
-  const app = buildApp({ config: options.config ?? config, ledger: options.ledger ?? ledger });
+function createApp(options: { config?: AppConfig; ledger?: LedgerGateway; clock?: () => number } = {}) {
+  const app = buildApp({ config: options.config ?? config, ledger: options.ledger ?? ledger, ...(options.clock ? { clock: options.clock } : {}) });
   apps.push(app);
   return app;
 }
@@ -328,6 +328,7 @@ describe("Esure API", () => {
       const active = await app.inject({ method: "GET", url: `/api/v1/runs/${id}` });
       expect(active.json().status).not.toMatch(/passed|failed/);
       expect(active.json()).not.toHaveProperty("expiresAt");
+      await vi.waitFor(() => expect(blockedLedger.execute).toHaveBeenCalled());
       release({ steps: [], assertions: [] });
     });
 
@@ -336,12 +337,12 @@ describe("Esure API", () => {
       const app = createApp({ config: { ...config, runRetentionMs: retentionMs } });
       const started = await app.inject({ method: "POST", url: "/api/v1/runs", payload: { scenarioId: "xlm-payment" } });
       const id = started.json().id as string;
-      let run: ReturnType<typeof started.json> | undefined;
+      let run: { status: string; expiresAt?: string; completedAt?: string } | undefined;
       await vi.waitFor(async () => {
         run = (await app.inject({ method: "GET", url: `/api/v1/runs/${id}` })).json();
-        expect(run.status).toBe("passed");
+        expect(run!.status).toBe("passed");
       });
-      expect(run!.expiresAt).toBe(new Date(Date.parse(run!.completedAt) + retentionMs).toISOString());
+      expect(run!.expiresAt).toBe(new Date(Date.parse(run!.completedAt!) + retentionMs).toISOString());
 
       const report = await app.inject({ method: "GET", url: `/api/v1/runs/${id}/report` });
       expect(report.statusCode).toBe(200);

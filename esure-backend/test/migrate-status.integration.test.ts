@@ -30,6 +30,8 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
       databasePoolMax: 5, databaseConnectionTimeoutMs: 5_000, databaseQueryTimeoutMs: 5_000, databaseIdleTimeoutMs: 10_000,
       runPersistenceEnabled: false,
     });
+    const roles = await import("node:fs/promises").then(({ readFile }) => readFile(resolve("database/bootstrap-roles.sql"), "utf8"));
+    await database.query(roles);
   }, 60_000);
 
   afterAll(async () => {
@@ -65,7 +67,11 @@ const postgresAvailable = process.platform !== "win32" || existsSync("C:/Windows
     // makes that applied version look "unexpected" from this directory's viewpoint,
     // while a genuinely new, never-applied file (added below) is reported pending.
     const { readdir, unlink, writeFile } = await import("node:fs/promises");
-    const files = (await readdir(trimmedCopy)).filter((file) => /^\d{3}_.*\.sql$/.test(file)).sort();
+    // Matches only "up" migration files (same pattern as migrationFiles() in
+    // src/database.ts) — a plain `.*\.sql$` would also match the sibling
+    // "NNN_name.down.sql" rollback file and, since both share the numeric
+    // prefix, could be picked over the real "up" file below.
+    const files = (await readdir(trimmedCopy)).filter((file) => /^\d{3}_[a-z0-9_]+\.sql$/.test(file)).sort();
     const highestFile = files.find((file) => Number(file.slice(0, 3)) === highestVersion);
     if (highestFile) await unlink(join(trimmedCopy, highestFile));
     await writeFile(join(trimmedCopy, "999_not_yet_applied.sql"), "-- no-op pending migration\nSELECT 1;\n");
