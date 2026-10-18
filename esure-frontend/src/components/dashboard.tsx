@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { ApiError, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
+import { ApiError, RateLimitError, getRun, getScenario, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioDetail, type ScenarioSummary } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed"]);
 
@@ -14,6 +14,14 @@ export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "xlm", label: "XLM" },
   { key: "issued-asset", label: "Issued Asset" },
   { key: "expected-failure", label: "Expected Failure" },
+];
+
+
+export type ReportFilter = "all" | "failed";
+
+export const REPORT_FILTER_OPTIONS: { key: ReportFilter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "failed", label: "Failed" },
 ];
 
 export const SORT_OPTIONS: { key: SortOrder; label: string }[] = [
@@ -75,6 +83,22 @@ export function Dashboard() {
   const [catalogueError, setCatalogueError] = useState<string | null>(null);
   const [pollingError, setPollingError] = useState<string | null>(null);
   const [consecutiveFailures, setConsecutiveFailures] = useState(0);
+  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
+
+  // #32 — Scenario preview panel
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [previewScenario, setPreviewScenario] = useState<ScenarioDetail | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const previewAbortRef = useRef<AbortController | null>(null);
+
+  // #39 — Rate-limit countdown (seconds remaining before retry is allowed)
+  const [rateLimitCountdown, setRateLimitCountdown] = useState<number | null>(null);
+  const rateLimitTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // #42 — ARIA live region: tracks last announcement to deduplicate
+  const [liveAnnouncement, setLiveAnnouncement] = useState<string>("");
+  const lastAnnouncedRef = useRef<string>("");
 
   // Search state — preserved while a run is in progress (#29)
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -151,6 +175,67 @@ export function Dashboard() {
     newParams.delete("runId");
     router.replace(pathname + (newParams.toString() ? "?" + newParams.toString() : ""), { scroll: false });
   }
+
+
+  // #32 — Load scenario detail on-demand, cancel stale requests
+  useEffect(() => {
+    if (!previewId) {
+      setPreviewScenario(null);
+      setPreviewError(null);
+      return;
+    }
+    previewAbortRef.current?.abort();
+    const controller = new AbortController();
+    previewAbortRef.current = controller;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    getScenario(previewId, controller.signal)
+      .then((detail) => {
+        if (controller.signal.aborted) return;
+        setPreviewScenario(detail);
+      })
+      .catch((reason: unknown) => {
+        if (controller.signal.aborted) return;
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        setPreviewError(readError(reason));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setPreviewLoading(false);
+      });
+    return () => { controller.abort(); };
+  }, [previewId]);
+
+  // #39 — Clear rate-limit timer when it expires or component unmounts
+  useEffect(() => {
+    return () => {
+      if (rateLimitTimerRef.current !== null) clearInterval(rateLimitTimerRef.current);
+    };
+  }, []);
+
+  // #42 — Announce meaningful run lifecycle transitions to assistive technology
+  const prevRunStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const currentStatus = run?.status ?? null;
+    const prev = prevRunStatusRef.current;
+    prevRunStatusRef.current = currentStatus;
+    if (!currentStatus || currentStatus === prev) return;
+    const scenarioName = run ? (scenarios.find((s) => s.id === run.scenarioId)?.name ?? run.scenarioId) : "";
+    let message = "";
+    if (prev === null && currentStatus && !terminalStatuses.has(currentStatus)) {
+      message = `Run started for scenario ${scenarioName}.`;
+    } else if (currentStatus === "passed") {
+      message = `Run passed for scenario ${scenarioName}.`;
+    } else if (currentStatus === "failed") {
+      const failSummary = run?.summary
+        ? `${run.summary.stepsFailed} step${run.summary.stepsFailed !== 1 ? "s" : ""} and ${run.summary.assertionsFailed} assertion${run.summary.assertionsFailed !== 1 ? "s" : ""} failed.`
+        : "Check the report for details.";
+      message = `Run failed for scenario ${scenarioName}. ${failSummary}`;
+    }
+    if (message && message !== lastAnnouncedRef.current) {
+      lastAnnouncedRef.current = message;
+      setLiveAnnouncement(message);
+    }
+  }, [run, scenarios]);
 
   const loadScenarios = useCallback(() => {
     let active = true;
@@ -290,7 +375,7 @@ export function Dashboard() {
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
 
   async function handleRun() {
-    if (!selectedId) return;
+    if (!selectedId || rateLimitCountdown !== null) return;
     setStarting(true);
     setError(null);
     setRun(null);
@@ -301,7 +386,23 @@ export function Dashboard() {
       newParams.set("runId", newRun.id);
       router.replace(pathname + "?" + newParams.toString(), { scroll: false });
     } catch (reason) {
-      setError(readError(reason));
+      if (reason instanceof RateLimitError) {
+        const delay = reason.retryAfterSeconds ?? 10;
+        setRateLimitCountdown(delay);
+        if (rateLimitTimerRef.current !== null) clearInterval(rateLimitTimerRef.current);
+        rateLimitTimerRef.current = setInterval(() => {
+          setRateLimitCountdown((prev) => {
+            if (prev === null || prev <= 1) {
+              if (rateLimitTimerRef.current !== null) { clearInterval(rateLimitTimerRef.current); rateLimitTimerRef.current = null; }
+              return null;
+            }
+            return prev - 1;
+          });
+        }, 1000);
+        setError(`Rate limited. Retry in ${delay}s.`);
+      } else {
+        setError(readError(reason));
+      }
     } finally {
       setStarting(false);
     }
@@ -311,6 +412,16 @@ export function Dashboard() {
 
   return (
     <main>
+      {/* #42 — Polite ARIA live region for run lifecycle announcements */}
+      <div
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        className="sr-only"
+        id="run-live-region"
+      >
+        {liveAnnouncement}
+      </div>
       <header className="topbar shell">
         <a className="brand" href="#top" aria-label="Esure home">
           <img className="brand-mark" src="/esure-mark.svg" width="38" height="38" alt="" aria-hidden="true" />
@@ -449,27 +560,89 @@ export function Dashboard() {
             </div>
           ) : (
             filteredScenarios.map((scenario, index) => (
-              <button
-                type="button"
+              <div
+                role="button"
+                tabIndex={0}
                 className={`scenario-card ${selectedId === scenario.id ? "selected" : ""}`}
                 key={scenario.id}
+                id={`scenario-card-${scenario.id}`}
                 onClick={() => setSelectedId(scenario.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setSelectedId(scenario.id);
+                  }
+                }}
               >
                 <span className="card-index">0{index + 1}</span>
                 <ScenarioIcon kind={scenario.id} />
                 <span className="scenario-name">{scenario.name}</span>
                 <span className="scenario-description">{scenario.description}</span>
                 <span className="version">V{scenario.version}</span>
-              </button>
+                <button
+                  type="button"
+                  className="preview-btn"
+                  aria-label={`Preview definition for ${scenario.name}`}
+                  aria-expanded={previewId === scenario.id}
+                  onClick={(e) => { e.stopPropagation(); setPreviewId(previewId === scenario.id ? null : scenario.id); }}
+                >
+                  {previewId === scenario.id ? "Close" : "Details"}
+                </button>
+              </div>
             ))
           )}
         </div>
 
+        {/* #32 — Scenario definition preview panel */}
+        {previewId && (
+          <div className="preview-panel" role="dialog" aria-label="Scenario definition preview" aria-modal="false">
+            <div className="preview-header">
+              <strong>{scenarios.find((s) => s.id === previewId)?.name ?? previewId}</strong>
+              <button
+                type="button"
+                className="preview-close"
+                aria-label="Close scenario preview"
+                onClick={() => setPreviewId(null)}
+              >
+                ×
+              </button>
+            </div>
+            {previewLoading && <div className="preview-loading"><span className="spinner" /><span>Loading definition…</span></div>}
+            {previewError && <div className="preview-error" role="alert">{previewError}</div>}
+            {!previewLoading && !previewError && previewScenario && (
+              <div className="preview-body">
+                <dl className="preview-meta">
+                  <div><dt>ID</dt><dd><code>{previewScenario.id}</code></dd></div>
+                  <div><dt>Version</dt><dd>{previewScenario.version}</dd></div>
+                  <div><dt>Schema version</dt><dd>{previewScenario.schemaVersion}</dd></div>
+                  <div><dt>Content hash</dt><dd className="hash-cell"><code>{previewScenario.contentHash}</code></dd></div>
+                  <div><dt>Accounts</dt><dd>{previewScenario.accounts.length}</dd></div>
+                  <div><dt>Assets</dt><dd>{previewScenario.assets.length}</dd></div>
+                  <div><dt>Steps</dt><dd>{previewScenario.steps.length}</dd></div>
+                  <div><dt>Assertions</dt><dd>{previewScenario.assertions.length}</dd></div>
+                </dl>
+                <p className="preview-description">{previewScenario.description}</p>
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="launch-panel">
           <div><span className="label">SELECTED SCENARIO</span><strong>{selected?.name ?? "Choose a scenario"}</strong><span>{selected?.id ?? "—"}</span></div>
-          <button className="run-button" type="button" disabled={!selected || starting || isRunning} onClick={handleRun}>
-            {starting ? "Starting…" : isRunning ? "Running…" : "Run on Testnet"}<PlayIcon />
+          <button
+            className="run-button"
+            type="button"
+            disabled={!selected || starting || isRunning || rateLimitCountdown !== null}
+            onClick={handleRun}
+            aria-describedby={rateLimitCountdown !== null ? "rate-limit-countdown" : undefined}
+          >
+            {starting ? "Starting…" : isRunning ? "Running…" : rateLimitCountdown !== null ? `Retry in ${rateLimitCountdown}s` : "Run on Testnet"}<PlayIcon />
           </button>
+          {rateLimitCountdown !== null && (
+            <p id="rate-limit-countdown" className="rate-limit-note" role="status" aria-live="polite">
+              Rate limited — you can try again in <strong>{rateLimitCountdown}s</strong>.
+            </p>
+          )}
         </div>
       </section>
 
@@ -598,7 +771,7 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
           </div>
         ))}
         {run.assertions.map((assertion, index) => (
-          <AssertionRow key={`${assertion.type}-${index}`} assertion={assertion} />
+          <AssertionRow key={`${assertion.type}-${index}`} assertion={assertion} reportFilter={reportFilter} />
         ))}
         {run.error && <div className="run-error"><WarningIcon /><div><strong>{run.error.code}</strong><span>{run.error.message}</span></div></div>}
       </div>
@@ -613,16 +786,17 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
 }
 
 // #34 — Expandable assertion row with expected / actual values
-function AssertionRow({ assertion }: { assertion: import("@/lib/api").AssertionResult }) {
+function AssertionRow({ assertion, reportFilter }: { assertion: import("@/lib/api").AssertionResult; reportFilter?: ReportFilter }) {
   const [expanded, setExpanded] = useState(false);
   const hasDiff = assertion.expected !== undefined || assertion.actual !== undefined;
   const isFailed = assertion.status === "failed";
 
   return (
-    <div className={`assertion ${isFailed && hasDiff ? "assertion--has-diff" : ""}`}>
+    <div className={`assertion report-row ${isFailed && hasDiff ? "assertion--has-diff" : ""}`} hidden={reportFilter === "failed" && assertion.status !== "failed"}>
       <span className={`step-dot ${assertion.status}`}><CheckIcon /></span>
       <div className="assertion-body">
         <span className="label">ASSERTION / {assertion.type}</span>
+        <span className="print-status-label">{titleCase(assertion.status)}</span>
         <strong>{assertion.message}</strong>
         {hasDiff && (
           <div className="assertion-diff-toggle">

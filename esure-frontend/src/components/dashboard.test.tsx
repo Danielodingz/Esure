@@ -203,7 +203,7 @@ describe("Dashboard component scenario filtering", () => {
 
     expect(screen.getByText("00 AVAILABLE")).toBeDefined();
     expect(screen.getByText("No scenarios found")).toBeDefined();
-    expect(screen.getByRole("status")).toBeDefined();
+    expect(screen.getAllByRole("status").length).toBeGreaterThan(0);
   });
 });
 
@@ -628,5 +628,85 @@ describe("Dashboard Sequential Polling and Recovery", () => {
 
     await act(async () => { vi.advanceTimersByTime(1000); await Promise.resolve(); });
     expect(getRunMock).toHaveBeenCalledTimes(7);
+  });
+
+});
+describe("Scenario definition preview, rate limiting, and ARIA announcements (#32, #39, #42)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("renders polite ARIA live region for screen readers (#42)", async () => {
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const liveRegion = document.getElementById("run-live-region");
+    expect(liveRegion).not.toBeNull();
+    expect(liveRegion?.getAttribute("role")).toBe("status");
+    expect(liveRegion?.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("opens scenario preview panel and fetches detail when Details button is clicked (#32)", async () => {
+    const mockDetail: api.ScenarioDetail = {
+      id: "xlm-payment",
+      version: 1,
+      name: "XLM payment",
+      description: "Detailed description of XLM payment.",
+      contentHash: "hash-full-123456789",
+      network: "testnet",
+      schemaVersion: 1,
+      accounts: [{ id: "acc1", label: "Sender" }],
+      assets: [{ code: "XLM", issuer: "native" }],
+      steps: [{ id: "step1", description: "Send payment" }],
+      assertions: [{ id: "ast1", description: "Balance check" }],
+    };
+    vi.spyOn(api, "getScenario").mockResolvedValueOnce(mockDetail);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const detailsBtn = screen.getByLabelText("Preview definition for XLM payment");
+    expect(detailsBtn).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(detailsBtn);
+    });
+
+    expect(screen.getByRole("dialog", { name: "Scenario definition preview" })).toBeDefined();
+    await waitFor(() => {
+      expect(screen.getByText("Detailed description of XLM payment.")).toBeDefined();
+      expect(screen.getByText("hash-full-123456789")).toBeDefined();
+    });
+  });
+
+  it("handles 429 RateLimitError with retry countdown (#39)", async () => {
+    vi.spyOn(api, "startRun").mockRejectedValueOnce(
+      new api.RateLimitError("Rate limit reached", 429, 15)
+    );
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    // Click the scenario card by ID
+    const card = document.getElementById("scenario-card-xlm-payment");
+    expect(card).not.toBeNull();
+    await act(async () => {
+      fireEvent.click(card!);
+    });
+
+    const runBtn = screen.getByRole("button", { name: /Run on Testnet/i });
+    await act(async () => {
+      fireEvent.click(runBtn);
+    });
+
+    expect(screen.getByText(/Rate limited. Retry in 15s./i)).toBeDefined();
+    expect(screen.getByRole("button", { name: /Retry in 15s/i })).toBeDefined();
   });
 });

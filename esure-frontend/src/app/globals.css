@@ -239,3 +239,28 @@ footer { border-top:1px solid var(--line); min-height:80px; display:flex; justif
 .inline-clear { background:none; border:none; color:var(--deep); font:600 14px var(--font-sans),sans-serif; text-decoration:underline; cursor:pointer; padding:0; }
 .inline-clear:hover { color:var(--ink); }
 .inline-clear:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
+
+/* ── Screen-reader only utility (#42) ───────────────────────────────────── */
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+
+/* ── Scenario preview panel (#32) ───────────────────────────────────────── */
+.preview-btn { position:absolute; bottom:12px; right:12px; background:transparent; border:1px solid var(--line); border-radius:2px; padding:4px 8px; font:600 9px var(--font-mono); letter-spacing:.08em; text-transform:uppercase; color:var(--deep); cursor:pointer; transition:.15s; z-index:1; }
+.preview-btn:hover { border-color:var(--deep); background:#edf3df; }
+.preview-btn:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
+.preview-panel { border:1px solid var(--line); background:var(--paper); margin-bottom:14px; }
+.preview-header { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--line); }
+.preview-header strong { font:700 13px var(--font-mono); }
+.preview-close { background:none; border:none; font-size:20px; cursor:pointer; color:var(--muted); padding:2px 6px; border-radius:2px; line-height:1; }
+.preview-close:hover { color:var(--ink); }
+.preview-close:focus-visible { outline:2px solid var(--deep); outline-offset:2px; }
+.preview-loading { display:flex; align-items:center; gap:10px; padding:18px; color:var(--muted); font-size:13px; }
+.preview-error { padding:18px; color:#c0392b; font-size:13px; }
+.preview-body { padding:18px; }
+.preview-meta { display:grid; grid-template-columns:auto 1fr; gap:6px 16px; margin:0 0 12px; }
+.preview-meta dt { font:700 9px var(--font-mono); letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+.preview-meta dd { font:400 11px var(--font-mono); margin:0; }
+.hash-cell code { word-break:break-all; }
+.preview-description { font:400 13px var(--font-sans),sans-serif; color:var(--muted); line-height:1.5; margin:0; }
+
+/* ── Run button rate-limit note (#39) ───────────────────────────────────── */
+.rate-limit-note { font:400 12px var(--font-mono); color:var(--muted); margin:6px 0 0; }
