@@ -7,6 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "bench:stores": "tsx scripts/benchmark-stores.ts",
     "dev": "tsx watch src/server.ts",
     "generate:api-types": "node scripts/generate-api-types.mjs",
     "db:migrate": "tsx scripts/migrate.ts",

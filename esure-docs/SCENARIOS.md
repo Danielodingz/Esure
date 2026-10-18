@@ -6,7 +6,7 @@ no executable code or credentials and are validated before Testnet access.
 
 ## Bundled Scenarios
 
-ESURE includes 10 MVP scenarios for Testnet integration testing:
+ESURE includes 13 bundled scenarios for Testnet integration testing:
 
 | Scenario ID | Purpose | Expected Result |
 | --- | --- | --- |
@@ -14,9 +14,11 @@ ESURE includes 10 MVP scenarios for Testnet integration testing:
 | `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
-| `payment-with-memo` | Send XLM with memo for transaction tracking | Pass |
+| `unfunded-destination` | Fund only the sender and pay a generated destination absent from the ledger | Controlled `tx_failed/op_no_destination` failure |
+| `payment-with-memo` | Send XLM with a text memo and verify it on the confirmed transaction | Pass |
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
 | `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
+| `trustline-limit-exact` | Pay exactly the fractional trustline limit and verify the final balance | Pass |
 | `trustline-already-exists` | Multiple payments using existing trustline | Pass |
 | `basic-payment-with-checks` | Send XLM and verify both accounts exist | Pass |
 | `minimum-xlm-payment` | Send minimum viable XLM (1 stroop) | Pass |
@@ -25,6 +27,39 @@ ESURE includes 10 MVP scenarios for Testnet integration testing:
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers
 commonly need to test.
+
+`trustline-limit-exact` creates fresh issuer and recipient accounts for each run,
+funds both on Testnet, and opens the recipient's `LIMITED` trustline with an
+explicit limit of `"100.1234567"`. The issuer pays exactly `"100.1234567"` into
+that initially empty trustline. Assertions require the trustline and payment
+steps to succeed, the payment transaction to be confirmed, and the recipient's
+final issued-asset balance to equal `"100.1234567"`. Every amount is a quoted
+decimal string with all seven fractional digits preserved. This positive
+boundary case complements the unchanged `trustline-limit-exceeded` fixture.
+Accounts and the generated issuer are isolated from other runs; no existing
+holdings or public liquidity are needed.
+
+Offline tests inspect the built trustline limit and payment amount and mock the
+final ledger balance. The optional live path is `RUN_STELLAR_SMOKE=1 npm test --
+test/testnet-smoke.test.ts -t trustline-limit-exact` from `esure-backend` (use
+PowerShell environment syntax documented in the backend README on Windows).
+
+`unfunded-destination` generates two keypairs but funds only the sender.
+Generating a keypair is a local cryptographic operation; it does not create an
+account on the ledger. The destination has `fund: false`, and the scenario sends
+`"1"` native XLM using an ordinary payment. A payment requires an existing
+destination account and does not replace an account-creation operation. No
+destination funding or implicit account creation is performed.
+
+The run passes only when `stepFailedWith` matches transaction code `tx_failed`
+and exactly the operation-code sequence `[op_no_destination]`. A successful
+payment, a different failure such as `op_underfunded`, or a network error fails
+the run. This is separate from `insufficient-xlm-balance`, whose destination
+exists and whose sender attempts to spend more than its available balance.
+Verify live behavior only through the existing opt-in smoke path: set
+`RUN_STELLAR_SMOKE=1`, then run
+`npm test -- test/testnet-smoke.test.ts -t unfunded-destination` from
+`esure-backend`. Normal unit/API tests use mocked funding and Horizon responses.
 
 `path-payment` provisions its own Testnet liquidity. It creates generated sender,
 market-maker, recipient, and issuer accounts, then submits trustlines, issues
@@ -78,7 +113,8 @@ assertions:
 ## Operations
 
 - `changeTrust`: `id`, `account`, `asset`, and optional positive `limit`.
-- `payment`: `id`, `from`, `to`, `asset`, and positive decimal `amount`.
+- `payment`: `id`, `from`, `to`, `asset`, positive decimal `amount`, and optional
+  `memo` text. The memo is attached to the transaction containing this payment.
 - `manageSellOffer`: `id`, `account`, `sellingAsset`, `buyingAsset`, positive
   `amount`, and positive `price`.
 - `pathPaymentStrictReceive`: `id`, `from`, `to`, `sendAsset`, `sendMax`,
@@ -99,6 +135,11 @@ signed 64-bit stroop range.
 - `trustlineExists(account, asset)`
 - `trustlineMissing(account, asset)`
 - `transactionConfirmed(step)`
+- `transactionMemoEquals(step, memo)`: targets a payment step and reads its
+  successful transaction from Horizon by the submitted transaction hash. Reports
+  contain the expected and actual bounded text; absent, non-text, malformed, or
+  oversized memo evidence produces `actual: null` and fails the assertion.
+  Lookup failures use the normal bounded, sanitized network-error path.
 - `accountExists(account)`
 
 Reports include explicit `expected` and `actual` values for every assertion,
@@ -106,6 +147,28 @@ plus `scenarioVersion`, `scenarioSchemaVersion`, and a canonical SHA-256
 `scenarioContentHash`.
 
 ## Validation and limits
+
+Text memos (both payment `memo` and assertion `memo`) must be well-formed Unicode
+of at most **28 UTF-8 bytes**, not 28 characters. For example, 14 `é` or seven
+`😀` characters fit; adding one ASCII character exceeds the limit. Empty text
+is permitted and is distinct from omitting the memo. No trimming, truncation,
+or Unicode normalization occurs. The JSON Schema advertises a 28-character
+upper bound; server semantic validation additionally enforces UTF-8 byte length
+and rejects lone surrogate code units. Other memo types and memo fields on
+other operations are rejected. See the [Stellar memo protocol documentation](https://developers.stellar.org/docs/learn/fundamentals/transactions/operations-and-transactions).
+
+```yaml
+steps:
+  - { id: pay, type: payment, from: sender, to: recipient, asset: xlm, amount: "10", memo: "Esure memo tracking" }
+assertions:
+  - { type: transactionMemoEquals, step: pay, memo: "Esure memo tracking" }
+```
+
+The bundled `payment-with-memo` fixture is version 2. Existing version 1
+definitions and payments that omit `memo` retain their behavior. Published
+catalogues should publish/reconcile version 2 using the existing workflow;
+immutable version 1 records are not rewritten. OpenAPI embeds the canonical
+schema, and generated API types import the updated domain types directly.
 
 - Only `network: testnet` and `schemaVersion: 1` are accepted.
 - Unknown properties, duplicate IDs, unresolved references, native trustlines,

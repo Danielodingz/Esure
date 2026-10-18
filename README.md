@@ -31,7 +31,7 @@ take longer than subsequent requests.
 
 ## Capabilities
 
-- **10 MVP Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
+- **13 Bundled Scenarios**: XLM payments, issued assets, trustlines, expected failures, multi-op transactions (Testnet only)
 - **Developer-Friendly Errors**: Plain-English explanations for 30+ Stellar error codes with causes and fix suggestions
 - **Command-Line Interface**: Run scenarios from terminal or CI pipelines (run from source; not yet published to npm)
 - **CI/CD Integration**: First-class GitHub Actions, GitLab CI, and CircleCI support
@@ -66,7 +66,7 @@ Unlike Stellar Lab, which requires manual step-through and copy/paste workflow, 
 
 ## Bundled scenarios
 
-Esure includes 10 MVP scenarios for Testnet integration testing:
+Esure includes 13 bundled scenarios for Testnet integration testing:
 
 | Scenario | Purpose | Expected result |
 | --- | --- | --- |
@@ -74,9 +74,11 @@ Esure includes 10 MVP scenarios for Testnet integration testing:
 | `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
-| `payment-with-memo` | Send XLM with memo for transaction tracking | Pass |
+| `unfunded-destination` | Pay a generated destination that has not been funded or created on the ledger | Controlled `tx_failed/op_no_destination` failure |
+| `payment-with-memo` | Send XLM with a text memo and verify it on the confirmed transaction | Pass |
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
 | `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
+| `trustline-limit-exact` | Pay exactly the fractional trustline limit and verify the final balance | Pass |
 | `trustline-already-exists` | Multiple payments using existing trustline | Pass |
 | `basic-payment-with-checks` | Send XLM and verify both accounts exist after transaction | Pass |
 | `minimum-xlm-payment` | Send minimum viable XLM amount (1 stroop = 0.0000001 XLM) | Pass |
