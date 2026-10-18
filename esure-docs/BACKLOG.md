@@ -62,7 +62,7 @@ Acceptance criteria:
 - A retry action is available.
 - No internal stack trace is shown to users.
 
-### F5. Add Playwright coverage for the primary journey
+### F5. Primary journey Playwright coverage (implemented)
 
 **Suggested complexity:** High
 
