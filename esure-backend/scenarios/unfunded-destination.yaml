@@ -1,0 +1,29 @@
+schemaVersion: 1
+id: unfunded-destination
+version: 1
+name: Payment to an unfunded destination
+description: Verify that generating a keypair does not create a ledger account and a native payment fails with op_no_destination.
+network: testnet
+accounts:
+  - id: sender
+    generate: true
+    fund: true
+  - id: destination
+    generate: true
+    fund: false
+assets:
+  - id: xlm
+    type: native
+steps:
+  - id: pay-unfunded-destination
+    type: payment
+    from: sender
+    to: destination
+    asset: xlm
+    amount: "1"
+assertions:
+  - type: stepFailedWith
+    step: pay-unfunded-destination
+    transactionCode: tx_failed
+    operationCodes:
+      - op_no_destination

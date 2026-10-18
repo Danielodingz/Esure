@@ -19,7 +19,7 @@ describe.runIf(live)("real Stellar Testnet smoke", () => {
   beforeAll(async () => app.ready());
   afterAll(async () => app.close());
 
-  for (const scenarioId of ["xlm-payment", "issued-asset-payment", "missing-trustline"] as const) {
+  for (const scenarioId of ["xlm-payment", "issued-asset-payment", "missing-trustline", "payment-with-memo", "unfunded-destination", "trustline-limit-exact"] as const) {
     it(`executes ${scenarioId} through the public API`, async () => {
       const started = await app.inject({
         method: "POST",
@@ -31,6 +31,11 @@ describe.runIf(live)("real Stellar Testnet smoke", () => {
       expect(report.status).toBe("passed");
       expect(report.steps.every((step) => step.status === "passed")).toBe(true);
       expect(report.assertions.every((assertion) => assertion.status === "passed")).toBe(true);
+      if (scenarioId === "payment-with-memo") {
+        expect(report.assertions).toContainEqual(expect.objectContaining({
+          type: "transactionMemoEquals", status: "passed", expected: "Esure memo tracking", actual: "Esure memo tracking",
+        }));
+      }
       if (scenarioId === "xlm-payment") {
         expect(report.assertions[0]).toMatchObject({ type: "balanceChangedBy", expected: "5", actual: "5" });
       }
@@ -39,6 +44,22 @@ describe.runIf(live)("real Stellar Testnet smoke", () => {
           type: "stepFailedWith",
           actual: "tx_failed/op_no_trust",
         });
+      }
+      if (scenarioId === "unfunded-destination") {
+        expect(report.steps).toContainEqual(expect.objectContaining({
+          id: "pay-unfunded-destination", status: "passed", stellarTransactionCode: "tx_failed", stellarOperationCodes: ["op_no_destination"],
+        }));
+        expect(report.assertions).toEqual([expect.objectContaining({
+          type: "stepFailedWith", status: "passed", expected: "tx_failed/op_no_destination", actual: "tx_failed/op_no_destination",
+        })]);
+      }
+      if (scenarioId === "trustline-limit-exact") {
+        expect(report.assertions).toEqual([
+          expect.objectContaining({ type: "stepSucceeded", status: "passed", actual: true }),
+          expect.objectContaining({ type: "stepSucceeded", status: "passed", actual: true }),
+          expect.objectContaining({ type: "transactionConfirmed", status: "passed", actual: true }),
+          expect.objectContaining({ type: "balanceEquals", status: "passed", expected: "100.1234567", actual: "100.1234567" }),
+        ]);
       }
       const downloaded = await app.inject({ method: "GET", url: `/api/v1/runs/${report.id}/report` });
       expect(downloaded.statusCode).toBe(200);
