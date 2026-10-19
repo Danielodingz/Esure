@@ -1,0 +1,43 @@
+schemaVersion: 1
+id: trustline-limit-exact
+version: 1
+name: Payment exactly fills a trustline
+description: Verify that an issued-asset payment equal to an explicit fractional trustline limit succeeds and leaves the exact balance.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: limited-asset
+    type: issued
+    code: LIMITED
+    issuer: issuer
+steps:
+  - id: create-limited-trustline
+    type: changeTrust
+    account: recipient
+    asset: limited-asset
+    limit: "100.1234567"
+  - id: fill-trustline
+    type: payment
+    from: issuer
+    to: recipient
+    asset: limited-asset
+    amount: "100.1234567"
+assertions:
+  - type: stepSucceeded
+    step: create-limited-trustline
+  - type: stepSucceeded
+    step: fill-trustline
+  - type: transactionConfirmed
+    step: fill-trustline
+  - type: balanceEquals
+    account: recipient
+    asset: limited-asset
+    amount: "100.1234567"
