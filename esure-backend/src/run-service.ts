@@ -19,6 +19,7 @@ export class RunService {
     private readonly store: RunStore,
     private readonly ledger: LedgerGateway,
     private readonly options: { maxConcurrentRuns: number; runTimeoutMs: number; stepTimeoutMs: number },
+    private readonly now: () => number = Date.now,
   ) {}
 
   /** True once drain() has been called; new starts are rejected after this point. */
@@ -49,7 +50,7 @@ export class RunService {
       scenarioContentHash: scenario.contentHash,
       network: "testnet",
       status: "requested",
-      createdAt: new Date().toISOString(),
+      createdAt: new Date(this.now()).toISOString(),
       steps: [],
       assertions: [],
       summary: emptySummary(),
@@ -108,7 +109,7 @@ export class RunService {
       const passed = summary.stepsFailed === 0 && summary.assertionsFailed === 0;
       await this.store.update(id, {
         status: passed ? "passed" : "failed",
-        completedAt: new Date().toISOString(),
+        completedAt: new Date(this.now()).toISOString(),
         steps: result.steps,
         assertions: result.assertions,
         summary,
@@ -128,7 +129,7 @@ export class RunService {
       const assertions = current?.assertions ?? [];
       await this.store.update(id, {
         status: "failed",
-        completedAt: new Date().toISOString(),
+        completedAt: new Date(this.now()).toISOString(),
         steps,
         assertions,
         summary: summarize(steps, assertions),
