@@ -1,7 +1,7 @@
 name: Feature proposal
 description: Propose a focused improvement to Esure
 title: "feat: "
-labels: ["type:feature", "status:needs-triage"]
+labels: ["enhancement"]
 body:
   - type: textarea
     id: problem
@@ -15,6 +15,13 @@ body:
     attributes:
       label: Desired outcome
       description: Describe observable behavior, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable conditions that will show the outcome is complete.
     validations:
       required: true
   - type: textarea

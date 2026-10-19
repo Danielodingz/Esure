@@ -41,16 +41,21 @@ work during time-boxed contribution campaigns.
 - New dependencies require a clear need and must pass the repository audit.
 - Accessibility and reduced-motion behavior are required for frontend changes.
 
-## Issue sizing
+## Issue labels and sizing
 
-Issues are labelled by contributor complexity:
+Issue forms apply a type label: `bug` or `enhancement`. Maintainers add one or
+more area labels: `backend`, `frontend`, `cli`, `scenarios`, `documentation`, or
+`testing`.
 
-- `complexity:trivial`: documentation or a very small isolated correction
-- `complexity:medium`: a standard feature or involved bug fix
-- `complexity:high`: architecture, security, or multi-component integration
+Difficulty labels describe the expected scope, not contributor ability:
 
-Complexity describes expected work, not contributor ability. Maintainers have
-the final say on issue scope and completion.
+- `trivial`: documentation or a very small isolated correction
+- `medium`: a focused feature or fix requiring edge-case and regression coverage
+- `hard`: architecture, security, or multi-component integration
+
+Use `good first issue` only for small, well-scoped work; do not apply it
+automatically to medium or hard issues. Maintainers have the final say on issue
+scope and completion.
 
 ## Conduct and security
 
