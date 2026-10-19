@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ValidatedScenario } from "@esure/backend/src/domain.js";
+import type { ValidatedScenario } from "@esure/backend/domain.js";
 
 const mocks = vi.hoisted(() => ({
   execute: vi.fn(),
@@ -10,10 +10,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile }));
-vi.mock("@esure/backend/src/scenarios.js", () => ({
+vi.mock("@esure/backend/scenarios.js", () => ({
   createScenarioRegistry: mocks.createRegistry,
 }));
-vi.mock("@esure/backend/src/stellar-gateway.js", () => ({
+vi.mock("@esure/backend/stellar-gateway.js", () => ({
   StellarTestnetGateway: class {
     execute = mocks.execute;
   },

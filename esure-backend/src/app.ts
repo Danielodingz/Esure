@@ -67,7 +67,7 @@ const exportQuerySchema = {
   properties: { format: { type: "string", enum: ["json", "yaml"] } },
 } as const;
 
-export function buildApp(options: BuildAppOptions): FastifyInstance {
+export function buildApp(options: BuildAppOptions): AppInstance {
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
   app.addContentTypeParser(["application/yaml", "application/x-yaml", "text/yaml"], { parseAs: "string" }, (_request, body, done) => done(null, body));
   // Issue #77: fastify's default text/plain parser would otherwise accept

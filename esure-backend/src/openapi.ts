@@ -64,6 +64,8 @@ export function openApiDocument() {
             "- `changeTrust` may not target a native asset.",
             "- `trustlineExists`/`trustlineMissing` assertions may not target a native asset.",
             "- Amount values (decimal strings) must not exceed Stellar's signed 64-bit stroops limit.",
+            "- Payment memo and transactionMemoEquals memo must contain valid Unicode and at most 28 UTF-8 bytes, not characters. Empty text is permitted; an omitted memo means no memo.",
+            "- transactionMemoEquals must reference a payment step and compares the successful Horizon transaction's text memo, not the input definition.",
             "- Secret seeds and URLs are forbidden in all string fields.",
             "- The total serialized definition must not exceed 16 384 bytes.",
           ].join(" "),

@@ -3,6 +3,7 @@ import {
   BASE_FEE,
   Horizon,
   Keypair,
+  Memo,
   Networks,
   Operation,
   TransactionBuilder,
@@ -27,6 +28,7 @@ import {
   withTimeout,
 } from "./errors.js";
 import { interpretOperationCode, interpretTransactionCode, isStellarErrorRetryable } from "./stellar-error-interpreter.js";
+import { isTextMemo } from "./text-memo.js";
 
 export type { FriendbotRetryConfig };
 
@@ -191,7 +193,7 @@ export class StellarTestnetGateway implements LedgerGateway {
         destination: required(accounts, definition.to).publicKey(),
         asset: required(assets, definition.asset),
         amount: definition.amount,
-      })]);
+      })], definition.memo);
       return transactionStep(definition.id, definition.type, response);
     }
     if (definition.type === "manageSellOffer") {
@@ -235,6 +237,18 @@ export class StellarTestnetGateway implements LedgerGateway {
     options: LedgerExecutionOptions,
   ): Promise<AssertionResult> {
     switch (definition.type) {
+      case "transactionMemoEquals": {
+        const outcome = required(outcomes, definition.step);
+        let actual: string | null = null;
+        if (outcome.succeeded && outcome.result.transactionHash && outcome.result.ledger) {
+          const hash = outcome.result.transactionHash;
+          const transaction = await executeBounded(`assert-${definition.type}`, options, async () =>
+            this.withHorizonRetry(() => this.#server.transactions().transaction(hash).call(), "transaction lookup"));
+          // Only bounded text from the matching successful transaction enters a report.
+          if (transaction.hash === hash && transaction.successful && transaction.memo_type === "text" && isTextMemo(transaction.memo)) actual = transaction.memo;
+        }
+        return comparison(definition.type, definition.memo, actual, `Text memo for step ${definition.step} matched the confirmed transaction.`);
+      }
       case "balanceEquals": {
         const actual = await this.readBalanceOrZero(required(accounts, definition.account).publicKey(), required(assets, definition.asset), options, `assert-${definition.type}`);
         return comparison(definition.type, canonicalDecimal(definition.amount), canonicalDecimal(actual), `Balance for ${definition.account}/${definition.asset} matched.`);
@@ -362,10 +376,11 @@ export class StellarTestnetGateway implements LedgerGateway {
     ReturnType<typeof Operation.manageSellOffer> |
     ReturnType<typeof Operation.pathPaymentStrictReceive> |
     ReturnType<typeof Operation.pathPaymentStrictSend>
-  >) {
+  >, memo?: string) {
     const account = await this.withHorizonRetry(() => this.#server.loadAccount(source.publicKey()), "account loading");
     const timebounds = await this.withHorizonRetry(() => this.#server.fetchTimebounds(60), "transaction submission");
     const builder = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, timebounds });
+    if (memo !== undefined) builder.addMemo(Memo.text(memo));
     for (const operation of operations) builder.addOperation(operation);
     const transaction = builder.build();
     transaction.sign(source);
@@ -403,7 +418,7 @@ export class StellarTestnetGateway implements LedgerGateway {
 
   private async withHorizonRetry<T>(
     operation: () => Promise<T>,
-    request: "transaction submission" | "account loading",
+    request: "transaction submission" | "account loading" | "transaction lookup",
   ): Promise<T> {
     const config = {
       maxRetries: Math.max(0, this.#options.horizonRetry?.maxRetries ?? DEFAULT_HORIZON_RETRY_CONFIG.maxRetries),
