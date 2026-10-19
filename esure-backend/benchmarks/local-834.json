@@ -1,0 +1,259 @@
+{
+  "metadata": {
+    "measuredAt": "2026-10-18T08:50:46.294Z",
+    "node": "v24.11.1",
+    "v8": "13.6.233.10-node.28",
+    "os": "win32",
+    "release": "10.0.22631",
+    "arch": "x64",
+    "cpu": "Intel(R) Core(TM) i7-6820HQ CPU @ 2.70GHz",
+    "logicalCpus": 8,
+    "seed": 834,
+    "samples": 20,
+    "warmup": 5,
+    "clock": "hrtime.bigint",
+    "unit": "microseconds"
+  },
+  "rows": [
+    {
+      "operation": "get",
+      "workload": "mostly-active",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 33.5,
+      "p95Us": 52.8,
+      "minUs": 25.3
+    },
+    {
+      "operation": "get",
+      "workload": "mostly-active",
+      "capacity": 500,
+      "initialSize": 499,
+      "expiredEntries": 0,
+      "medianUs": 77.2,
+      "p95Us": 156.2,
+      "minUs": 66.4
+    },
+    {
+      "operation": "get",
+      "workload": "mostly-expired",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 28,
+      "medianUs": 45.2,
+      "p95Us": 59.5,
+      "minUs": 33.5
+    },
+    {
+      "operation": "get",
+      "workload": "mostly-expired",
+      "capacity": 500,
+      "initialSize": 499,
+      "expiredEntries": 449,
+      "medianUs": 303.3,
+      "p95Us": 537.4,
+      "minUs": 279.2
+    },
+    {
+      "operation": "get",
+      "workload": "eviction-heavy",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 21.9,
+      "p95Us": 33.1,
+      "minUs": 21.2
+    },
+    {
+      "operation": "get",
+      "workload": "eviction-heavy",
+      "capacity": 500,
+      "initialSize": 500,
+      "expiredEntries": 0,
+      "medianUs": 77.7,
+      "p95Us": 93.5,
+      "minUs": 66.6
+    },
+    {
+      "operation": "create",
+      "workload": "mostly-active",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 19.3,
+      "p95Us": 37.8,
+      "minUs": 18.2
+    },
+    {
+      "operation": "create",
+      "workload": "mostly-active",
+      "capacity": 500,
+      "initialSize": 499,
+      "expiredEntries": 0,
+      "medianUs": 64.5,
+      "p95Us": 97.6,
+      "minUs": 54.5
+    },
+    {
+      "operation": "create",
+      "workload": "mostly-expired",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 28,
+      "medianUs": 31.6,
+      "p95Us": 65.4,
+      "minUs": 30.7
+    },
+    {
+      "operation": "create",
+      "workload": "mostly-expired",
+      "capacity": 500,
+      "initialSize": 499,
+      "expiredEntries": 449,
+      "medianUs": 266.7,
+      "p95Us": 405,
+      "minUs": 240.9
+    },
+    {
+      "operation": "create",
+      "workload": "eviction-heavy",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 19.2,
+      "p95Us": 30,
+      "minUs": 18.6
+    },
+    {
+      "operation": "create",
+      "workload": "eviction-heavy",
+      "capacity": 500,
+      "initialSize": 500,
+      "expiredEntries": 0,
+      "medianUs": 136.1,
+      "p95Us": 177.4,
+      "minUs": 116.7
+    },
+    {
+      "operation": "update",
+      "workload": "mostly-active",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 26.6,
+      "p95Us": 34.9,
+      "minUs": 25.6
+    },
+    {
+      "operation": "update",
+      "workload": "mostly-active",
+      "capacity": 500,
+      "initialSize": 499,
+      "expiredEntries": 0,
+      "medianUs": 84.3,
+      "p95Us": 90.7,
+      "minUs": 72
+    },
+    {
+      "operation": "update",
+      "workload": "mostly-expired",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 28,
+      "medianUs": 36.4,
+      "p95Us": 40.8,
+      "minUs": 35.8
+    },
+    {
+      "operation": "update",
+      "workload": "mostly-expired",
+      "capacity": 500,
+      "initialSize": 499,
+      "expiredEntries": 449,
+      "medianUs": 291.2,
+      "p95Us": 336.4,
+      "minUs": 260.5
+    },
+    {
+      "operation": "update",
+      "workload": "eviction-heavy",
+      "capacity": 500,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 27.4,
+      "p95Us": 31.9,
+      "minUs": 26.9
+    },
+    {
+      "operation": "update",
+      "workload": "eviction-heavy",
+      "capacity": 500,
+      "initialSize": 500,
+      "expiredEntries": 0,
+      "medianUs": 93.3,
+      "p95Us": 163.1,
+      "minUs": 79
+    },
+    {
+      "operation": "consume",
+      "workload": "mostly-active",
+      "capacity": 10000,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 5.6,
+      "p95Us": 26.7,
+      "minUs": 3.3
+    },
+    {
+      "operation": "consume",
+      "workload": "mostly-active",
+      "capacity": 10000,
+      "initialSize": 9999,
+      "expiredEntries": 0,
+      "medianUs": 192.1,
+      "p95Us": 248,
+      "minUs": 143.3
+    },
+    {
+      "operation": "consume",
+      "workload": "mostly-expired",
+      "capacity": 10000,
+      "initialSize": 32,
+      "expiredEntries": 28,
+      "medianUs": 5,
+      "p95Us": 28.6,
+      "minUs": 4.7
+    },
+    {
+      "operation": "consume",
+      "workload": "mostly-expired",
+      "capacity": 10000,
+      "initialSize": 9999,
+      "expiredEntries": 8999,
+      "medianUs": 1778.2,
+      "p95Us": 2330.9,
+      "minUs": 1216
+    },
+    {
+      "operation": "consume",
+      "workload": "eviction-heavy",
+      "capacity": 10000,
+      "initialSize": 32,
+      "expiredEntries": 0,
+      "medianUs": 2.1,
+      "p95Us": 2.3,
+      "minUs": 2
+    },
+    {
+      "operation": "consume",
+      "workload": "eviction-heavy",
+      "capacity": 10000,
+      "initialSize": 10000,
+      "expiredEntries": 0,
+      "medianUs": 226.3,
+      "p95Us": 364.3,
+      "minUs": 166.9
+    }
+  ]
+}
