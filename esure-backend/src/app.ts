@@ -14,6 +14,7 @@ import { scenarioSchemaV1, ScenarioValidationError } from "./scenario-schema.js"
 import { createScenarioRegistry } from "./scenarios.js";
 import { StellarTestnetGateway } from "./stellar-gateway.js";
 import { PersistenceCoordinator } from "./persistence.js";
+import { ScenarioIntegrityError } from "./published-scenarios.js";
 import { IdempotencyStore } from "./idempotency-store.js";
 
 interface BuildAppOptions { config: AppConfig; ledger?: LedgerGateway; logger?: boolean; clock?: () => number; }
@@ -38,34 +39,6 @@ const IDEMPOTENCY_MAX_ENTRIES = 1_000;
  * Entries older than this are pruned lazily on the next lookup.
  */
 const IDEMPOTENCY_RETENTION_MS = 86_400_000;
-
-// ── Issue #78: strict query/path schemas for version endpoints ────────────
-// String patterns, not bare `integer` JSON Schema types, are used so the
-// accepted textual contract is explicit: no decimals, no scientific
-// notation, no leading zeros, and no empty values. Final numeric bounds
-// (e.g. the int32 ceiling) are still checked at runtime because the
-// patterns alone allow more digits than fit in the bound.
-const scenarioIdParamSchema = { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z0-9-]+$" } as const;
-const positiveIntTextPattern = "^[1-9][0-9]{0,9}$";
-const versionParamsSchema = {
-  type: "object", additionalProperties: false, required: ["scenarioId", "version"],
-  properties: { scenarioId: scenarioIdParamSchema, version: { type: "string", pattern: positiveIntTextPattern } },
-} as const;
-const scenarioIdParamsSchema = {
-  type: "object", additionalProperties: false, required: ["scenarioId"],
-  properties: { scenarioId: scenarioIdParamSchema },
-} as const;
-const historyQuerySchema = {
-  type: "object", additionalProperties: false,
-  properties: {
-    limit: { type: "string", pattern: "^[1-9][0-9]{0,2}$" },
-    cursor: { type: "string", pattern: positiveIntTextPattern },
-  },
-} as const;
-const exportQuerySchema = {
-  type: "object", additionalProperties: false,
-  properties: { format: { type: "string", enum: ["json", "yaml"] } },
-} as const;
 
 export function buildApp(options: BuildAppOptions): AppInstance {
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: options.config.bodyLimitBytes, ajv: { customOptions: { removeAdditional: false } } });
@@ -98,12 +71,10 @@ export function buildApp(options: BuildAppOptions): AppInstance {
     reply.header("x-ratelimit-limit", limit).header("x-ratelimit-remaining", result.remaining);
     if (!result.allowed) { reply.header("retry-after", result.retryAfterSeconds); return reply.code(429).send(apiError("RATE_LIMITED", "Request limit exceeded. Try again later.", request.id)); }
   });
-  const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl);
-  // Single clock source (issue #76): used both for in-memory run eviction and
-  // for computing the expiresAt hint on terminal run responses, so the two
-  // never disagree in tests or in production.
-  const clock = options.clock ?? Date.now;
-  const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs, clock), ledger, {
+  const ledger = options.ledger ?? new StellarTestnetGateway(options.config.horizonUrl, options.config.friendbotUrl, {
+    fundingConcurrency: options.config.maxConcurrentFriendbotRequests,
+  });
+  const runs = new RunService(persistence.runStore ?? new InMemoryRunStore(options.config.maxStoredRuns, options.config.runRetentionMs), ledger, {
     maxConcurrentRuns: options.config.maxConcurrentRuns, runTimeoutMs: options.config.runTimeoutMs, stepTimeoutMs: options.config.stepTimeoutMs,
   }, clock);
 
@@ -261,6 +232,9 @@ export function buildApp(options: BuildAppOptions): AppInstance {
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof RunCapacityError) return reply.code(503).send({ error: { ...error.report, requestId: request.id, details: [] } });
     if (error instanceof DatabaseUnavailableError) return reply.code(503).send(apiError("DATABASE_UNAVAILABLE", "The persistent scenario catalogue is temporarily unavailable.", request.id));
+    // Issue #81: a persisted scenario row failed its integrity re-check. Respond with a
+    // sanitized availability error — never the underlying ScenarioIntegrityError detail.
+    if (error instanceof ScenarioIntegrityError) return reply.code(503).send(apiError("CATALOGUE_INTEGRITY_ERROR", "The published scenario catalogue is temporarily unavailable.", request.id));
     if (error instanceof ScenarioValidationError) return reply.code(400).send(apiError("INVALID_SCENARIO", error.message, request.id, error.issues));
     if (isInvalidJsonBodyError(error)) {
       if (isScenarioDefinitionPath(request.url)) {
