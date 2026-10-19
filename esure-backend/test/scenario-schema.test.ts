@@ -106,6 +106,19 @@ assertions:
     expect(scenario?.accounts).toHaveLength(4);
   });
 
+  it("loads the bundled sender missing-trustline scenario", () => {
+    const scenario = createScenarioRegistry().find("sender-missing-trustline");
+    expect(scenario?.accounts.map((account) => account.id)).toEqual(["issuer", "sender", "recipient"]);
+    expect(scenario?.steps.some((step) => step.type === "changeTrust" && step.account === "sender")).toBe(false);
+    expect(scenario?.steps.at(-1)).toMatchObject({ type: "payment", from: "sender", to: "recipient", asset: "test-usd" });
+    expect(scenario?.assertions).toEqual(
+      expect.arrayContaining([
+        { type: "stepFailedWith", step: "send-testusd-without-trustline", transactionCode: "tx_failed", operationCodes: ["op_src_no_trust"] },
+        { type: "balanceEquals", account: "recipient", asset: "test-usd", amount: "50" },
+      ]),
+    );
+  });
+
   it("rejects unresolved or endpoint assets in path payment paths", () => {
     const scenario = createScenarioRegistry().find("path-payment")!;
     const { contentHash: _invalidHash, ...invalidReference } = structuredClone(scenario);

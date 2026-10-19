@@ -1,8 +1,8 @@
 schemaVersion: 1
 id: payment-with-memo
-version: 1
+version: 2
 name: Payment with memo
-description: Send XLM payment and verify the transaction can be tracked with memos.
+description: Send XLM with a text memo and verify it on the confirmed Testnet transaction.
 network: testnet
 accounts:
   - id: sender
@@ -21,7 +21,11 @@ steps:
     to: recipient
     asset: xlm
     amount: "10"
+    memo: "Esure memo tracking"
 assertions:
+  - type: transactionMemoEquals
+    step: send-xlm-with-memo
+    memo: "Esure memo tracking"
   - type: transactionConfirmed
     step: send-xlm-with-memo
   - type: balanceChangedBy

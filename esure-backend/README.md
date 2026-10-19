@@ -27,7 +27,10 @@ npm run build      # compile TypeScript
 npm test           # run unit/API tests
 npm run typecheck  # check types without emitting files
 npm run check      # typecheck and test
+npm run bench:stores -- 833 20 # offline bounded-store latency benchmark
 ```
+
+Benchmark methodology and local results are in [benchmarks/README.md](benchmarks/README.md).
 
 The default runner limits each step to 30 seconds, each run to 120 seconds,
 and concurrent execution to two runs. Request rates, in-memory retention, body
@@ -94,6 +97,11 @@ Remove-Item Env:RUN_STELLAR_SMOKE
 
 The same smoke test runs on a daily GitHub Actions schedule. Normal pull-request
 tests remain deterministic and make no external network calls.
+
+The smoke suite includes `payment-with-memo` version 2, which attaches a bounded
+text memo and checks `transactionMemoEquals` against Horizon's confirmed
+transaction. To run just this scenario, set `RUN_STELLAR_SMOKE=1` as above and use
+`npm test -- test/testnet-smoke.test.ts -t payment-with-memo`.
 
 ## Safety
 
