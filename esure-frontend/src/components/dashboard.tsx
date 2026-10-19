@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import {
   ApiError,
@@ -16,10 +16,12 @@ import {
   type RunReport,
   type ScenarioSummary,
 } from "@/lib/api";
+import { ApiError, getRun, listScenarios, startRun, type JsonValue, type RunReport, type ScenarioSummary } from "@/lib/api";
 
 const terminalStatuses = new Set(["passed", "failed"]);
 
 export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
+export type SortOrder = "name-asc" | "name-desc" | "id-asc";
 
 export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "all", label: "All" },
@@ -28,11 +30,10 @@ export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "expected-failure", label: "Expected Failure" },
 ];
 
-type ReportFilter = "all" | "failed";
-
-const REPORT_FILTER_OPTIONS: { key: ReportFilter; label: string }[] = [
-  { key: "all", label: "All" },
-  { key: "failed", label: "Failed" },
+export const SORT_OPTIONS: { key: SortOrder; label: string }[] = [
+  { key: "name-asc", label: "Name A–Z" },
+  { key: "name-desc", label: "Name Z–A" },
+  { key: "id-asc", label: "ID A–Z" },
 ];
 
 export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter): boolean {
@@ -44,10 +45,42 @@ export function filterScenario(scenario: ScenarioSummary, filter: ScenarioFilter
   return true;
 }
 
+export function searchScenario(scenario: ScenarioSummary, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return (
+    scenario.name.toLowerCase().includes(q) ||
+    scenario.id.toLowerCase().includes(q) ||
+    scenario.description.toLowerCase().includes(q)
+  );
+}
+
+export function sortScenarios(list: ScenarioSummary[], order: SortOrder): ScenarioSummary[] {
+  const sorted = [...list];
+  sorted.sort((a, b) => {
+    if (order === "name-asc") {
+      const cmp = a.name.localeCompare(b.name);
+      return cmp !== 0 ? cmp : a.id.localeCompare(b.id);
+    }
+    if (order === "name-desc") {
+      const cmp = b.name.localeCompare(a.name);
+      return cmp !== 0 ? cmp : a.id.localeCompare(b.id);
+    }
+    // id-asc
+    return a.id.localeCompare(b.id);
+  });
+  return sorted;
+}
+
+const VALID_CATEGORIES = new Set<string>(FILTER_OPTIONS.map((o) => o.key));
+
+function parseCategory(value: string | null): ScenarioFilter {
+  if (value && VALID_CATEGORIES.has(value)) return value as ScenarioFilter;
+  return "all";
+}
+
 export function Dashboard() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
-  const [filter, setFilter] = useState<ScenarioFilter>("all");
-  const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
   const [selectedId, setSelectedId] = useState<string>("");
   const [run, setRun] = useState<RunReport | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,10 +93,42 @@ export function Dashboard() {
   const [importError, setImportError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"report" | "compare">("report");
 
+  // Search state — preserved while a run is in progress (#29)
+  const [searchQuery, setSearchQuery] = useState<string>("");
+
+  // Sort state (#30)
+  const [sortOrder, setSortOrder] = useState<SortOrder>("name-asc");
+
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const runIdParam = searchParams?.get("runId");
+
+  // --- #31: read category from URL on first render ---
+  const [filter, setFilter] = useState<ScenarioFilter>(() =>
+    parseCategory(searchParams?.get("category") ?? null),
+  );
+
+  // Sync filter <-> URL (without clobbering other params)
+  const prevFilterRef = useRef<ScenarioFilter>(filter);
+  useEffect(() => {
+    if (prevFilterRef.current === filter) return;
+    prevFilterRef.current = filter;
+    const newParams = new URLSearchParams(searchParams?.toString() ?? "");
+    if (filter === "all") {
+      newParams.delete("category");
+    } else {
+      newParams.set("category", filter);
+    }
+    router.replace(pathname + (newParams.toString() ? "?" + newParams.toString() : ""), { scroll: false });
+  }, [filter, pathname, router, searchParams]);
+
+  // Keep filter in sync when URL changes via back/forward (#31)
+  const urlCategory = searchParams?.get("category") ?? null;
+  useEffect(() => {
+    const parsed = parseCategory(urlCategory);
+    setFilter((prev) => (prev !== parsed ? parsed : prev));
+  }, [urlCategory]);
 
   const [restoringRun, setRestoringRun] = useState(false);
   const [restorationError, setRestorationError] = useState<string | null>(null);
@@ -135,9 +200,13 @@ export function Dashboard() {
     return loadScenarios();
   }, [loadScenarios]);
 
+  // Apply filter, search, and sort (#29, #30)
   const filteredScenarios = useMemo(() => {
-    return scenarios.filter((s) => filterScenario(s, filter));
-  }, [scenarios, filter]);
+    const filtered = scenarios.filter(
+      (s) => filterScenario(s, filter) && searchScenario(s, searchQuery),
+    );
+    return sortScenarios(filtered, sortOrder);
+  }, [scenarios, filter, searchQuery, sortOrder]);
 
   useEffect(() => {
     if (filteredScenarios.length > 0) {
@@ -286,6 +355,7 @@ export function Dashboard() {
     setRun(null);
     setImportError(null);
   }
+  const isRunning = !!run && !terminalStatuses.has(run.status);
 
   return (
     <main>
@@ -327,6 +397,7 @@ export function Dashboard() {
           <span className="scenario-count">{filteredScenarios.length.toString().padStart(2, "0")} AVAILABLE</span>
         </div>
 
+        {/* Filters row */}
         <div className="scenario-filters" role="tablist" aria-label="Scenario filter options">
           {FILTER_OPTIONS.map((option) => (
             <button
@@ -341,6 +412,53 @@ export function Dashboard() {
               {option.label}
             </button>
           ))}
+        </div>
+
+        {/* Search + Sort toolbar (#29 #30) */}
+        <div className="catalogue-toolbar">
+          <div className="search-field">
+            <label htmlFor="scenario-search" className="search-label">Search</label>
+            <div className="search-input-wrap">
+              <SearchIcon />
+              <input
+                id="scenario-search"
+                type="search"
+                className="search-input"
+                placeholder="Name, ID, or description…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                aria-label="Search scenarios by name, ID, or description"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  className="search-clear"
+                  aria-label="Clear search"
+                  onClick={() => setSearchQuery("")}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="sort-field">
+            <label htmlFor="scenario-sort" className="sort-label">Sort</label>
+            <div className="sort-select-wrap">
+              <select
+                id="scenario-sort"
+                className="sort-select"
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value as SortOrder)}
+                aria-label={`Sort scenarios: ${SORT_OPTIONS.find((o) => o.key === sortOrder)?.label}`}
+              >
+                {SORT_OPTIONS.map((o) => (
+                  <option key={o.key} value={o.key}>{o.label}</option>
+                ))}
+              </select>
+              <ChevronIcon />
+            </div>
+          </div>
         </div>
 
         {error && <div className="error-banner" role="alert"><WarningIcon /><div><strong>Couldn&apos;t complete the request</strong><span>{error}</span></div></div>}
@@ -371,7 +489,11 @@ export function Dashboard() {
           ) : filteredScenarios.length === 0 ? (
             <div className="empty-scenarios" role="status" aria-live="polite">
               <strong>No scenarios found</strong>
-              <p>No scenarios match the selected filter (&quot;{FILTER_OPTIONS.find((o) => o.key === filter)?.label}&quot;).</p>
+              {searchQuery.trim() ? (
+                <p>No scenarios match &quot;{searchQuery.trim()}&quot;. <button type="button" className="inline-clear" onClick={() => setSearchQuery("")}>Clear search</button></p>
+              ) : (
+                <p>No scenarios match the selected filter (&quot;{FILTER_OPTIONS.find((o) => o.key === filter)?.label}&quot;).</p>
+              )}
             </div>
           ) : (
             filteredScenarios.map((scenario, index) => (
@@ -393,8 +515,8 @@ export function Dashboard() {
 
         <div className="launch-panel">
           <div><span className="label">SELECTED SCENARIO</span><strong>{selected?.name ?? "Choose a scenario"}</strong><span>{selected?.id ?? "—"}</span></div>
-          <button className="run-button" type="button" disabled={!selected || starting || (!!run && !terminalStatuses.has(run.status))} onClick={handleRun}>
-            {starting ? "Starting…" : run && !terminalStatuses.has(run.status) ? "Running…" : "Run on Testnet"}<PlayIcon />
+          <button className="run-button" type="button" disabled={!selected || starting || isRunning} onClick={handleRun}>
+            {starting ? "Starting…" : isRunning ? "Running…" : "Run on Testnet"}<PlayIcon />
           </button>
         </div>
       </section>
@@ -586,14 +708,7 @@ function RunView({ run, isOffline, reportFilter, scenarioName }: { run: RunRepor
           </div>
         ))}
         {run.assertions.map((assertion, index) => (
-          <div
-            className="assertion report-row"
-            key={`${assertion.type}-${index}`}
-            hidden={reportFilter === "failed" && assertion.status !== "failed"}
-          >
-            <span className={`step-dot ${assertion.status}`}><CheckIcon /></span>
-            <div><span className="label">ASSERTION / {assertion.type}</span><span className="print-status-label">{titleCase(assertion.status)}</span><strong>{assertion.message}</strong></div>
-          </div>
+          <AssertionRow key={`${assertion.type}-${index}`} assertion={assertion} />
         ))}
         {run.error && (
           <div className="run-error" role="alert">
@@ -821,8 +936,81 @@ function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) 
           </div>
         </div>
       ) : null}
+// #34 — Expandable assertion row with expected / actual values
+function AssertionRow({ assertion }: { assertion: import("@/lib/api").AssertionResult }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDiff = assertion.expected !== undefined || assertion.actual !== undefined;
+  const isFailed = assertion.status === "failed";
+
+  return (
+    <div className={`assertion ${isFailed && hasDiff ? "assertion--has-diff" : ""}`}>
+      <span className={`step-dot ${assertion.status}`}><CheckIcon /></span>
+      <div className="assertion-body">
+        <span className="label">ASSERTION / {assertion.type}</span>
+        <strong>{assertion.message}</strong>
+        {hasDiff && (
+          <div className="assertion-diff-toggle">
+            <button
+              type="button"
+              className="diff-toggle-btn"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? "Hide details" : "Show details"}
+              <ChevronIcon rotated={expanded} />
+            </button>
+            {expanded && (
+              <div className="assertion-diff" role="region" aria-label="Assertion details">
+                <AssertionValue label="Expected" value={assertion.expected} />
+                <AssertionValue label="Actual" value={assertion.actual} />
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
+}
+
+const MAX_INLINE_LENGTH = 120;
+
+function AssertionValue({ label, value }: { label: string; value: JsonValue }) {
+  const [expanded, setExpanded] = useState(false);
+  const serialized = serializeJsonValue(value);
+  const isLong = serialized.length > MAX_INLINE_LENGTH;
+  const displayText = isLong && !expanded ? serialized.slice(0, MAX_INLINE_LENGTH) + "…" : serialized;
+
+  return (
+    <div className="assertion-value">
+      <span className="assertion-value-label">{label}</span>
+      <pre className="assertion-value-pre">{displayText}</pre>
+      {isLong && (
+        <button
+          type="button"
+          className="diff-toggle-btn diff-toggle-btn--small"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+        >
+          {expanded ? "Show less" : "Show full value"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Serialise a JsonValue to a human-readable string preserving decimal-string precision. */
+function serializeJsonValue(value: JsonValue): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") return String(value);
+  if (typeof value === "number") return String(value);
+  // array / object — JSON.stringify with indentation; values are already JS primitives
+  // so no precision is lost compared to Number coercion
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 function EmptyReport() {
@@ -867,6 +1055,18 @@ function ArrowIcon() { return <svg viewBox="0 0 16 16" fill="none"><path d="M3 1
 function DownloadIcon() { return <svg viewBox="0 0 20 20" fill="none"><path d="M10 3v10M6 9l4 4 4-4M4 17h12"/></svg>; }
 function CheckIcon() { return <svg viewBox="0 0 16 16" fill="none"><path d="m3 8 3 3 7-7"/></svg>; }
 function WarningIcon() { return <svg viewBox="0 0 20 20" fill="none"><path d="M10 3 18 17H2L10 3ZM10 8v4M10 15v.1"/></svg>; }
+function SearchIcon() { return <svg className="search-icon" viewBox="0 0 20 20" fill="none"><circle cx="8.5" cy="8.5" r="5"/><path d="m12.5 12.5 4 4"/></svg>; }
+function ChevronIcon({ rotated }: { rotated?: boolean } = {}) {
+  return (
+    <svg
+      className={`chevron-icon${rotated ? " chevron-icon--up" : ""}`}
+      viewBox="0 0 16 16"
+      fill="none"
+    >
+      <path d="M4 6l4 4 4-4" />
+    </svg>
+  );
+}
 
 function readError(reason: unknown): string {
   if (reason instanceof ApiError) return `${reason.message} (${reason.code})`;

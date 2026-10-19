@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { access, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { validateScenarioDefinition } from "@esure/backend/src/scenario-schema.js";
-import { prepareScenario } from "@esure/backend/src/scenario-loader.js";
-import { createScenarioRegistry } from "@esure/backend/src/scenarios.js";
-import { StellarTestnetGateway } from "@esure/backend/src/stellar-gateway.js";
-import { parse as parseYaml } from "yaml";
-import type { ValidatedScenario } from "@esure/backend/src/domain.js";
-import type { LedgerExecution, LedgerExecutionOptions } from "@esure/backend/src/domain.js";
+import { validateScenarioDefinition } from "@esure/backend/scenario-schema.js";
+import { prepareScenario } from "@esure/backend/scenario-loader.js";
+import { createScenarioRegistry } from "@esure/backend/scenarios.js";
+import { StellarTestnetGateway } from "@esure/backend/stellar-gateway.js";
+import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import type { ValidatedScenario } from "@esure/backend/domain.js";
+import type { LedgerExecution, LedgerExecutionOptions } from "@esure/backend/domain.js";
 
 const VERSION = "0.1.0";
 const BUNDLED_SCENARIO_DIR_TIMEOUT_MS = 30_000;
@@ -24,6 +24,12 @@ interface CliOptions {
   version?: boolean;
   /** #68 — use ASCII status markers (PASS/FAIL) instead of Unicode glyphs */
   ascii?: boolean;
+  /** #59 — write JSON run report to a file */
+  reportFile?: string;
+  /** #60 — write JUnit XML test report to a file */
+  junit?: string;
+  /** #59, #60, #62 — overwrite existing destination file */
+  overwrite?: boolean;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,23 +60,29 @@ esure - Stellar Testnet scenario testing toolkit
 Usage:
   esure list                              List bundled scenarios
   esure validate <file>                   Validate a scenario file
+  esure init <file>                       Scaffold a new scenario file (.json, .yaml, .yml)
   esure run <scenario-id>                 Run a bundled scenario
   esure run <file>                        Run a scenario from file
   esure run-suite <id> [<id>...]          Run multiple bundled scenarios sequentially
 
 Options:
-  --output <format>   Output format: human (default) or json
-  --ascii             Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
-  --fail-fast         (run-suite) Stop after first failure
-  --help              Show this help message
-  --version           Show version information
+  --output <format>        Output format: human (default) or json
+  --ascii                  Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
+  --report-file <path>     Write run report JSON to a file
+  --junit <path>           Write JUnit XML test results to a file
+  --overwrite              Overwrite existing output files (--report-file, --junit, init)
+  --fail-fast              (run-suite) Stop after first failure
+  --help                   Show this help message
+  --version                Show version information
 
 Examples:
   esure list
+  esure init ./my-scenario.yaml
   esure validate ./my-scenario.yaml
   esure run xlm-payment
-  esure run ./my-scenario.yaml --output json
-  esure run-suite xlm-payment path-payment --fail-fast
+  esure run ./my-scenario.yaml --output json --report-file report.json
+  esure run ./my-scenario.yaml --junit junit.xml
+  esure run-suite xlm-payment path-payment --fail-fast --report-file suite.json --junit suite.xml
 
 Documentation: https://github.com/Esureorg/Esure
 `);
@@ -127,6 +139,29 @@ function parseCliArgs(): {
       parseError: `Invalid output format "${values.output}". Supported formats: human, json`,
     };
   }
+  const { values, positionals } = parseArgs({
+    options: {
+      output: { type: "string" },
+      help: { type: "boolean", short: "h" },
+      version: { type: "boolean", short: "v" },
+      ascii: { type: "boolean" },
+      "fail-fast": { type: "boolean" },
+      "report-file": { type: "string" },
+      junit: { type: "string" },
+      "junit-file": { type: "string" },
+      overwrite: { type: "boolean" },
+      force: { type: "boolean" },
+    },
+    allowPositionals: true,
+    strict: false,
+  });
+
+  const rawJunit =
+    typeof values.junit === "string"
+      ? values.junit
+      : typeof values["junit-file"] === "string"
+        ? (values["junit-file"] as string)
+        : undefined;
 
   return {
     command: positionals[0],
@@ -136,6 +171,9 @@ function parseCliArgs(): {
       help: Boolean(values.help),
       version: Boolean(values.version),
       ascii: Boolean(values.ascii),
+      reportFile: typeof values["report-file"] === "string" ? values["report-file"] : undefined,
+      junit: rawJunit,
+      overwrite: Boolean(values.overwrite || values.force),
     },
     failFast: Boolean(values["fail-fast"]),
   };
@@ -215,6 +253,225 @@ function buildRunReport(
       assertionsFailed: execution.assertions.length - assertionsPassed,
     },
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Artifact writing & JUnit export (#59, #60, #62)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function escapeXml(unsafe: string): string {
+  return String(unsafe)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+export interface ScenarioRunResultForJunit {
+  scenarioId: string;
+  execution?: LedgerExecution;
+  error?: { message: string };
+}
+
+export function generateJunitXml(runs: ScenarioRunResultForJunit[]): string {
+  let totalTests = 0;
+  let totalFailures = 0;
+  let totalErrors = 0;
+
+  const testsuiteXmls: string[] = [];
+
+  for (const run of runs) {
+    let suiteTests = 0;
+    let suiteFailures = 0;
+    let suiteErrors = 0;
+    const testcaseXmls: string[] = [];
+
+    if (run.execution) {
+      for (const step of run.execution.steps) {
+        suiteTests += 1;
+        const name = `step ${step.id}: ${step.message || step.type}`;
+        if (step.status === "passed") {
+          testcaseXmls.push(
+            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0"/>`,
+          );
+        } else {
+          suiteFailures += 1;
+          testcaseXmls.push(
+            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0">\n      <failure message="${escapeXml(step.message)}" type="${escapeXml(step.type)}">${escapeXml(step.message)}</failure>\n    </testcase>`,
+          );
+        }
+      }
+
+      for (const assertion of run.execution.assertions) {
+        suiteTests += 1;
+        const name = `assertion ${assertion.type}: ${assertion.message}`;
+        if (assertion.status === "passed") {
+          testcaseXmls.push(
+            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0"/>`,
+          );
+        } else {
+          suiteFailures += 1;
+          testcaseXmls.push(
+            `    <testcase classname="${escapeXml(run.scenarioId)}" name="${escapeXml(name)}" time="0">\n      <failure message="${escapeXml(assertion.message)}" type="${escapeXml(assertion.type)}">${escapeXml(assertion.message)}</failure>\n    </testcase>`,
+          );
+        }
+      }
+    }
+
+    if (run.error) {
+      suiteTests += 1;
+      suiteErrors += 1;
+      testcaseXmls.push(
+        `    <testcase classname="${escapeXml(run.scenarioId)}" name="execution" time="0">\n      <error message="${escapeXml(run.error.message)}" type="ExecutionError">${escapeXml(run.error.message)}</error>\n    </testcase>`,
+      );
+    }
+
+    totalTests += suiteTests;
+    totalFailures += suiteFailures;
+    totalErrors += suiteErrors;
+
+    const testcases = testcaseXmls.length > 0 ? `\n${testcaseXmls.join("\n")}\n  ` : "";
+    testsuiteXmls.push(
+      `  <testsuite name="${escapeXml(run.scenarioId)}" tests="${suiteTests}" failures="${suiteFailures}" errors="${suiteErrors}">${testcases}</testsuite>`,
+    );
+  }
+
+  const suites = testsuiteXmls.length > 0 ? `\n${testsuiteXmls.join("\n")}\n` : "\n";
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="esure" tests="${totalTests}" failures="${totalFailures}" errors="${totalErrors}">${suites}</testsuites>\n`;
+}
+
+export async function writeArtifactFile(
+  filePath: string,
+  content: string,
+  overwrite: boolean,
+  artifactType: "report" | "JUnit" | "scaffold",
+): Promise<void> {
+  const absolutePath = resolve(filePath);
+
+  let exists = false;
+  try {
+    await access(absolutePath);
+    exists = true;
+  } catch {
+    exists = false;
+  }
+
+  if (exists && !overwrite) {
+    const typeLabel =
+      artifactType === "report" ? "Report" : artifactType === "JUnit" ? "JUnit" : "Scenario";
+    throw new Error(`${typeLabel} file "${filePath}" already exists. Use --overwrite to replace it.`);
+  }
+
+  const dir = dirname(absolutePath);
+  const base = basename(absolutePath);
+  const tempPath = resolve(dir, `.${base}.tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+
+  try {
+    await writeFile(tempPath, content, "utf-8");
+    await rename(tempPath, absolutePath);
+  } catch (error) {
+    try {
+      await unlink(tempPath);
+    } catch {
+      // ignore unlink error
+    }
+    throw error;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #62 — init command
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function initCommand(filePath: string, options: CliOptions): Promise<number> {
+  try {
+    const ext = extname(filePath).toLowerCase();
+    if (ext !== ".json" && ext !== ".yaml" && ext !== ".yml") {
+      throw new Error(
+        `Unsupported file extension "${ext}". Supported extensions are .json, .yaml, and .yml.`,
+      );
+    }
+
+    const baseName = basename(filePath);
+    const rawId = baseName.slice(0, baseName.length - ext.length);
+    let scenarioId = rawId
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/^-+|-+$/g, "");
+    if (!scenarioId || !/^[a-z]/.test(scenarioId)) {
+      scenarioId = "custom-scenario";
+    }
+    if (scenarioId.length > 64) {
+      scenarioId = scenarioId.slice(0, 64);
+    }
+
+    const definition = {
+      schemaVersion: 1,
+      id: scenarioId,
+      version: 1,
+      name: scenarioId.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+      description: "Send XLM between two Testnet accounts and verify the balance update.",
+      network: "testnet",
+      accounts: [
+        { id: "sender", generate: true, fund: true },
+        { id: "receiver", generate: true, fund: true },
+      ],
+      assets: [{ id: "xlm", type: "native" }],
+      steps: [
+        {
+          id: "payment",
+          type: "payment",
+          from: "sender",
+          to: "receiver",
+          asset: "xlm",
+          amount: "10.0000000",
+        },
+      ],
+      assertions: [
+        {
+          type: "transactionConfirmed",
+          step: "payment",
+        },
+        {
+          type: "balanceChangedBy",
+          account: "receiver",
+          asset: "xlm",
+          amount: "10.0000000",
+        },
+      ],
+    };
+
+    // Canonical validator verification
+    validateScenarioDefinition(definition);
+
+    let content: string;
+    if (ext === ".json") {
+      content = JSON.stringify(definition, null, 2) + "\n";
+    } else {
+      content = stringifyYaml(definition);
+    }
+
+    await writeArtifactFile(filePath, content, Boolean(options.overwrite), "scaffold");
+
+    if (options.output === "json") {
+      console.log(JSON.stringify({ created: true, path: filePath, scenarioId }, null, 2));
+    } else {
+      console.log(`Scenario scaffolded: ${filePath}`);
+      console.log("\nNext steps:");
+      console.log(`  Validate: esure validate ${filePath}`);
+      console.log(`  Run:      esure run ${filePath}\n`);
+    }
+    return 0;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (options.output === "json") {
+      console.error(JSON.stringify({ error: { message: msg } }));
+    } else {
+      console.error(`Error: ${msg}`);
+    }
+    return 1;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -315,9 +572,12 @@ async function validateCommand(filePath: string, options: CliOptions): Promise<n
 }
 
 async function runCommand(target: string, options: CliOptions): Promise<number> {
-  try {
-    let scenario: ValidatedScenario;
+  let scenario: ValidatedScenario | undefined;
+  let execution: LedgerExecution | undefined;
+  let report: ReturnType<typeof buildRunReport> | undefined;
+  let executionError: Error | undefined;
 
+  try {
     // Determine if target is a bundled scenario ID or file path
     if (target.includes("/") || target.includes("\\") || target.includes(".")) {
       scenario = await loadScenarioFile(target);
@@ -345,8 +605,8 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
 
     // #66 — attach onStep / onAssertion for real-time progress in human mode
     const execOptions = buildExecutionOptions(options);
-    const execution = await gateway.execute(scenario, execOptions);
-    const report = buildRunReport(scenario, execution);
+    execution = await gateway.execute(scenario, execOptions);
+    report = buildRunReport(scenario, execution);
 
     if (options.output === "json") {
       console.log(JSON.stringify(report, null, 2));
@@ -366,12 +626,20 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
         console.log(`\n${m.fail} One or more checks failed.`);
       }
     }
-
-    return report.status === "passed" ? 0 : 1;
   } catch (error) {
+    executionError = error instanceof Error ? error : new Error(String(error));
+    if (error && typeof error === "object" && "report" in error) {
+      const rawReport = (error as { report: unknown }).report;
+      if (rawReport && typeof rawReport === "object") {
+        execution =
+          (rawReport as { execution?: LedgerExecution }).execution ??
+          (rawReport as LedgerExecution);
+      }
+    }
+
     if (options.output === "json") {
       const errorObj: { message: string; report?: unknown } = {
-        message: error instanceof Error ? error.message : String(error),
+        message: executionError.message,
       };
       if (error && typeof error === "object" && "report" in error) {
         errorObj.report = (error as { report: unknown }).report;
@@ -380,11 +648,70 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
     } else {
       const m = markers(options.ascii ?? false);
       console.error(
-        `\n${m.fail} Run failed: ${error instanceof Error ? error.message : String(error)}`,
+        `\n${m.fail} Run failed: ${executionError.message}`,
       );
     }
-    return 1;
   }
+
+  // Handle artifact exports (#59, #60)
+  const scenarioId = scenario?.id ?? target;
+  let artifactError = false;
+
+  if (options.reportFile) {
+    try {
+      const reportPayload = report ?? {
+        scenarioId,
+        status: "error",
+        error: { message: executionError?.message ?? "Execution failed" },
+        steps: execution?.steps ?? [],
+        assertions: execution?.assertions ?? [],
+      };
+      await writeArtifactFile(
+        options.reportFile,
+        JSON.stringify(reportPayload, null, 2) + "\n",
+        Boolean(options.overwrite),
+        "report",
+      );
+    } catch (err: unknown) {
+      artifactError = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.output === "json") {
+        console.error(JSON.stringify({ error: { message: msg } }));
+      } else {
+        console.error(`Error writing report file: ${msg}`);
+      }
+    }
+  }
+
+  if (options.junit) {
+    try {
+      const xml = generateJunitXml([
+        {
+          scenarioId,
+          execution,
+          error: executionError ? { message: executionError.message } : undefined,
+        },
+      ]);
+      await writeArtifactFile(
+        options.junit,
+        xml,
+        Boolean(options.overwrite),
+        "JUnit",
+      );
+    } catch (err: unknown) {
+      artifactError = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.output === "json") {
+        console.error(JSON.stringify({ error: { message: msg } }));
+      } else {
+        console.error(`Error writing JUnit file: ${msg}`);
+      }
+    }
+  }
+
+  if (artifactError) return 1;
+  if (executionError) return 1;
+  return report?.status === "passed" ? 0 : 1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -463,6 +790,7 @@ async function runSuiteCommand(
 
   // 2. Execute sequentially with isolated gateway per scenario
   const results: SuiteScenarioResult[] = [];
+  const suiteJunitRuns: ScenarioRunResultForJunit[] = [];
   let suitePassed = true;
 
   if (options.output === "human") {
@@ -475,6 +803,7 @@ async function runSuiteCommand(
     }
 
     let result: SuiteScenarioResult;
+    let execution: LedgerExecution | undefined;
     try {
       const gateway = new StellarTestnetGateway(
         "https://horizon-testnet.stellar.org",
@@ -482,19 +811,28 @@ async function runSuiteCommand(
       );
       // Per-scenario isolated execution with progress callbacks in human mode
       const execOptions = buildExecutionOptions(options);
-      const execution = await gateway.execute(scenario, execOptions);
+      execution = await gateway.execute(scenario, execOptions);
       const report = buildRunReport(scenario, execution);
       result = {
         scenarioId: scenario.id,
         status: report.status,
         summary: report.summary,
       };
+      suiteJunitRuns.push({
+        scenarioId: scenario.id,
+        execution,
+      });
     } catch (error) {
+      const errObj = { message: error instanceof Error ? error.message : String(error) };
       result = {
         scenarioId: scenario.id,
         status: "error",
-        error: { message: error instanceof Error ? error.message : String(error) },
+        error: errObj,
       };
+      suiteJunitRuns.push({
+        scenarioId: scenario.id,
+        error: errObj,
+      });
     }
 
     results.push(result);
@@ -544,6 +882,56 @@ async function runSuiteCommand(
     }
   }
 
+  // Handle artifacts for suite (#59, #60)
+  let artifactError = false;
+
+  if (options.reportFile) {
+    try {
+      const suiteReportPayload = {
+        status: suitePassed ? "passed" : "failed",
+        total: results.length,
+        passed: passedCount,
+        failed: failedCount,
+        scenarios: results,
+      };
+      await writeArtifactFile(
+        options.reportFile,
+        JSON.stringify(suiteReportPayload, null, 2) + "\n",
+        Boolean(options.overwrite),
+        "report",
+      );
+    } catch (err: unknown) {
+      artifactError = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.output === "json") {
+        console.error(JSON.stringify({ error: { message: msg } }));
+      } else {
+        console.error(`Error writing report file: ${msg}`);
+      }
+    }
+  }
+
+  if (options.junit) {
+    try {
+      const xml = generateJunitXml(suiteJunitRuns);
+      await writeArtifactFile(
+        options.junit,
+        xml,
+        Boolean(options.overwrite),
+        "JUnit",
+      );
+    } catch (err: unknown) {
+      artifactError = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.output === "json") {
+        console.error(JSON.stringify({ error: { message: msg } }));
+      } else {
+        console.error(`Error writing JUnit file: ${msg}`);
+      }
+    }
+  }
+
+  if (artifactError) return 1;
   return suitePassed ? 0 : 1;
 }
 
@@ -579,6 +967,13 @@ async function main(): Promise<number> {
         return 1;
       }
       return validateCommand(args[0], options);
+    case "init":
+      if (args.length === 0) {
+        console.error("Error: Missing file path argument");
+        console.error("Usage: esure init <file>");
+        return 1;
+      }
+      return initCommand(args[0], options);
     case "run":
       if (args.length === 0) {
         console.error("Error: Missing scenario ID or file path");

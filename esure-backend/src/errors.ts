@@ -20,11 +20,11 @@ export function friendbotTimeoutError(failedStepId: string): SafeRunError {
 }
 
 export function horizonTimeoutError(
-  request: "transaction submission" | "account loading",
+  request: "transaction submission" | "account loading" | "transaction lookup",
 ): SafeRunError {
   const service = request === "transaction submission"
     ? "Horizon transaction submission"
-    : "Horizon account loading";
+    : request === "transaction lookup" ? "Horizon transaction lookup" : "Horizon account loading";
   return new SafeRunError({
     code: "HORIZON_UNAVAILABLE",
     message: `${service} timed out. ${TESTNET_RETRY_SUGGESTION}`,
