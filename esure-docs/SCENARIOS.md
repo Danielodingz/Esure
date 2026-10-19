@@ -14,6 +14,7 @@ ESURE includes 12 bundled scenarios for Testnet integration testing:
 | `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
 | `issued-asset-holder-transfer` | Issue 100 TESTUSD to a sender, who transfers 40 to a second holder | Pass |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
+| `sender-missing-trustline` | Attempt issued-asset payment from a funded, non-issuer sender without a trustline | Controlled `op_src_no_trust` failure |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
 | `unfunded-destination` | Fund only the sender and pay a generated destination absent from the ledger | Controlled `tx_failed/op_no_destination` failure |
 | `payment-with-memo` | Send XLM with a text memo and verify it on the confirmed transaction | Pass |
@@ -29,11 +30,13 @@ These scenarios demonstrate XLM transfers, issued assets, trustline management,
 expected failure handling, and multi-step transaction flows that Stellar developers
 commonly need to test.
 
-`issued-asset-holder-transfer` makes holder-to-holder transfer explicit. Both
-holders open a TESTUSD trustline, the issuer sends 100 TESTUSD to the sender,
-and the sender then pays 40 TESTUSD to the receiver. Issuance and the peer
-transfer are separate transactions, each checked with `transactionConfirmed`,
-and the exact final balances (60 and 40) are asserted for both holders.
+`missing-trustline` and `sender-missing-trustline` fail on opposite sides of
+the same payment. In `missing-trustline` the recipient cannot hold the asset, so
+Stellar reports `op_no_trust`. In `sender-missing-trustline` the recipient has a
+trustline and an issued balance of 50 TESTUSD, while the XLM-funded sender has
+never trusted the asset, so Stellar reports `op_src_no_trust` and the
+recipient's balance stays at exactly 50. The sender is deliberately not the
+issuer: an issuer can always send its own asset without a trustline.
 
 `path-payment` provisions its own Testnet liquidity. It creates generated sender,
 market-maker, recipient, and issuer accounts, then submits trustlines, issues
