@@ -1,6 +1,21 @@
 import { createHash } from "node:crypto";
 import Fastify, { type FastifyInstance } from "fastify";
 export type AppInstance = FastifyInstance & { runs: RunService };
+
+export async function closeAfterDrain(app: { close: () => Promise<void>; runs: Pick<AppInstance["runs"], "drain"> }, timeoutMs: number): Promise<void> {
+  const draining = app.runs.drain();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+    timer.unref();
+  });
+  try {
+    await Promise.race([draining, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  await app.close();
+}
 import type { AppConfig } from "./config.js";
 import type { LedgerGateway, RunReport, ValidatedScenario } from "./domain.js";
 import { RunCapacityError } from "./errors.js";

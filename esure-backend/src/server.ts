@@ -1,4 +1,4 @@
-import { buildApp } from "./app.js";
+import { buildApp, closeAfterDrain } from "./app.js";
 import { loadConfig } from "./config.js";
 
 const config = loadConfig();
@@ -16,12 +16,9 @@ try {
 //
 // SIGTERM and SIGINT each trigger shutdown exactly once.  The sequence is:
 //   1. Mark the RunService as draining — new run POSTs get 503 immediately.
-//   2. Close the HTTP listener so no new connections are accepted.
-//   3. Wait for all active executions to finish, capped at DRAIN_TIMEOUT_MS.
-//      Any run still executing when the deadline expires keeps running to
-//      completion inside execute(), but we stop waiting and move on.
-//   4. Close Fastify (which fires onClose hooks, releasing DB pools / timers).
-//   5. Exit.  If anything throws we still exit, just with code 1.
+//   2. Wait for active executions, capped at DRAIN_TIMEOUT_MS.
+//   3. Close Fastify (which fires onClose hooks, releasing DB pools / timers).
+//   4. Exit.  If anything throws we still exit, just with code 1.
 
 const DRAIN_TIMEOUT_MS = 30_000;
 
@@ -33,20 +30,12 @@ async function shutdown(signal: string): Promise<void> {
 
   app.log.info({ signal }, "Shutdown signal received — draining active runs");
 
-  // Stop accepting new runs immediately.
-  app.runs.drain().catch(() => undefined);
-
-  // Stop the HTTP listener (returns 503 for in-flight requests that haven't
-  // been routed yet and closes keep-alive sockets).
+  // Drain runs before Fastify's onClose hooks release persistence resources.
   try {
-    await app.close();
+    await closeAfterDrain(app, DRAIN_TIMEOUT_MS);
   } catch (closeError) {
-    app.log.error(closeError, "Error while closing the HTTP listener");
+    app.log.error(closeError, "Error while draining or closing the server");
   }
-
-  // Wait for active executions up to the grace period.
-  const drainDeadline = new Promise<void>((resolve) => setTimeout(resolve, DRAIN_TIMEOUT_MS).unref());
-  await Promise.race([app.runs.drain(), drainDeadline]);
 
   app.log.info("Shutdown complete");
   process.exit(0);

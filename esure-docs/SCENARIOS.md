@@ -13,6 +13,7 @@ ESURE includes 12 bundled scenarios for Testnet integration testing:
 | `xlm-payment` | Fund two accounts, transfer 5 XLM, verify balance change | Pass |
 | `issued-asset-payment` | Create TESTUSD trustline, issue 100 TESTUSD, verify balance | Pass |
 | `issued-asset-holder-transfer` | Issue 100 TESTUSD to a sender, who transfers 40 to a second holder | Pass |
+| `issued-asset-partial-redemption-transfer` | Redeem 30 of 100 TESTUSD, then transfer 20 of the remainder to another holder | Pass; holder balances are 50 and 20 |
 | `missing-trustline` | Attempt issued-asset payment without recipient trustline | Controlled `op_no_trust` failure |
 | `sender-missing-trustline` | Attempt issued-asset payment from a funded, non-issuer sender without a trustline | Controlled `op_src_no_trust` failure |
 | `insufficient-xlm-balance` | Attempt to send more XLM than available in account | Controlled `op_underfunded` failure |
@@ -21,9 +22,11 @@ ESURE includes 12 bundled scenarios for Testnet integration testing:
 | `multi-operation-transaction` | Execute trustline + payment atomically in single tx | Pass |
 | `trustline-limit-exceeded` | Attempt payment exceeding trustline limit | Controlled `op_line_full` failure |
 | `trustline-limit-exact` | Pay exactly the fractional trustline limit and verify the final balance | Pass |
+| `trustline-balance-reduction` | Attempt to lower an issued-asset trustline below its current balance | Controlled `op_invalid_limit` failure; balance unchanged |
 | `trustline-already-exists` | Multiple payments using existing trustline | Pass |
 | `basic-payment-with-checks` | Send XLM and verify both accounts exist | Pass |
 | `minimum-xlm-payment` | Send minimum viable XLM (1 stroop) | Pass |
+| `minimum-issued-asset-payment` | Transfer the smallest issued-asset unit between holders | Pass; sender and recipient balances are exact |
 | `path-payment` | Create EUR/XLM and USDC/EUR offers and send XLM through EUR to deliver USDC | Pass on Testnet |
 
 These scenarios demonstrate XLM transfers, issued assets, trustline management,
@@ -38,6 +41,13 @@ never trusted the asset, so Stellar reports `op_src_no_trust` and the
 recipient's balance stays at exactly 50. The sender is deliberately not the
 issuer: an issuer can always send its own asset without a trustline.
 
+`trustline-limit-exceeded` fails because a payment would put the recipient
+above its trustline limit (`op_line_full`). `trustline-balance-reduction` is a
+different operation: it first issues 10 units to a holder, then attempts to
+lower that trustline's limit to 5. Stellar rejects the `changeTrust` operation
+with `op_invalid_limit`, and the holder's issued-asset balance remains exactly
+10.
+
 `path-payment` provisions its own Testnet liquidity. It creates generated sender,
 market-maker, recipient, and issuer accounts, then submits trustlines, issues
 test-issued EUR/USDC assets to the market maker, and places EUR/XLM and USDC/EUR
@@ -45,6 +55,17 @@ sell offers. The USDC in this isolated scenario is not Circle-issued USDC. A
 strict-receive path payment converts sender XLM through EUR to deliver exactly
 5 USDC to the recipient (with a 10 XLM maximum). It does not depend on
 pre-existing public order-book liquidity.
+
+`issued-asset-partial-redemption-transfer` issues 100 TESTUSD to the sender,
+returns 30 to the issuer for redemption, then transfers 20 of the sender's
+remaining balance to the receiver. The final holder balances are 50 and 20:
+the 30 redeemed units are no longer held by either holder, and the issuer is
+not counted as an ordinary trustline balance in this conservation check.
+
+`minimum-issued-asset-payment` transfers `0.0000001` units, one stroop, the
+smallest amount representable for a Stellar asset with seven decimal places.
+The sender's balance decreases from 1 to `0.9999999`, and the recipient's
+balance increases to `0.0000001`.
 
 ```yaml
 schemaVersion: 1

@@ -1,0 +1,61 @@
+schemaVersion: 1
+id: minimum-issued-asset-payment
+version: 1
+name: Minimum issued-asset transfer
+description: Transfer one stroop of an issued asset between two trusted holders.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: sender
+    generate: true
+    fund: true
+  - id: recipient
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: test-asset
+    type: issued
+    code: TEST
+    issuer: issuer
+steps:
+  - id: sender-trusts-test-asset
+    type: changeTrust
+    account: sender
+    asset: test-asset
+  - id: recipient-trusts-test-asset
+    type: changeTrust
+    account: recipient
+    asset: test-asset
+  - id: issue-to-sender
+    type: payment
+    from: issuer
+    to: sender
+    asset: test-asset
+    amount: "1"
+  - id: send-one-stroop
+    type: payment
+    from: sender
+    to: recipient
+    asset: test-asset
+    amount: "0.0000001"
+assertions:
+  - type: trustlineExists
+    account: sender
+    asset: test-asset
+  - type: trustlineExists
+    account: recipient
+    asset: test-asset
+  - type: transactionConfirmed
+    step: send-one-stroop
+  - type: balanceEquals
+    account: sender
+    asset: test-asset
+    amount: "0.9999999"
+  - type: balanceEquals
+    account: recipient
+    asset: test-asset
+    amount: "0.0000001"

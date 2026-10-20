@@ -1,0 +1,71 @@
+schemaVersion: 1
+id: issued-asset-partial-redemption-transfer
+version: 1
+name: Partial redemption followed by a holder transfer
+description: Redeem part of an issued-asset balance, then transfer part of the remainder to another holder.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: sender
+    generate: true
+    fund: true
+  - id: receiver
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: test-usd
+    type: issued
+    code: TESTUSD
+    issuer: issuer
+steps:
+  - id: sender-trusts-testusd
+    type: changeTrust
+    account: sender
+    asset: test-usd
+  - id: receiver-trusts-testusd
+    type: changeTrust
+    account: receiver
+    asset: test-usd
+  - id: issue-to-sender
+    type: payment
+    from: issuer
+    to: sender
+    asset: test-usd
+    amount: "100"
+  - id: redeem-from-sender
+    type: payment
+    from: sender
+    to: issuer
+    asset: test-usd
+    amount: "30"
+  - id: sender-pays-receiver
+    type: payment
+    from: sender
+    to: receiver
+    asset: test-usd
+    amount: "20"
+assertions:
+  - type: trustlineExists
+    account: sender
+    asset: test-usd
+  - type: trustlineExists
+    account: receiver
+    asset: test-usd
+  - type: transactionConfirmed
+    step: issue-to-sender
+  - type: transactionConfirmed
+    step: redeem-from-sender
+  - type: transactionConfirmed
+    step: sender-pays-receiver
+  - type: balanceEquals
+    account: sender
+    asset: test-usd
+    amount: "50"
+  - type: balanceEquals
+    account: receiver
+    asset: test-usd
+    amount: "20"

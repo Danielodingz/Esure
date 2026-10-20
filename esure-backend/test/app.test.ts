@@ -1,10 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
-import type { AppInstance } from "../src/app.js";
+import { closeAfterDrain, type AppInstance } from "../src/app.js";
 import type { LedgerExecution, LedgerGateway, Scenario } from "../src/domain.js";
 import type { AppConfig } from "../src/config.js";
 import { SafeRunError } from "../src/errors.js";
 import { DatabaseUnavailableError } from "../src/database.js";
+import { createScenarioRegistry } from "../src/scenarios.js";
+import { InMemoryRunStore } from "../src/run-store.js";
+import { RunService } from "../src/run-service.js";
 import { completeScenario } from "./fixtures.js";
 
 const config: AppConfig = {
@@ -460,5 +463,62 @@ describe("Esure API", () => {
         expect(response.statusCode).toBe(503);
       }
     });
+  });
+});
+
+describe("graceful shutdown", () => {
+  it("keeps persistence open until an active run stores its final evidence", async () => {
+    let resolveExecution!: (execution: LedgerExecution) => void;
+    const execution = new Promise<LedgerExecution>((resolve) => { resolveExecution = resolve; });
+    const activeLedger: LedgerGateway = { execute: vi.fn(() => execution) };
+    const closeEvents: string[] = [];
+    const runs = new RunService(new InMemoryRunStore(), activeLedger, {
+      maxConcurrentRuns: 1,
+      runTimeoutMs: 5_000,
+      stepTimeoutMs: 1_000,
+    });
+    const persistenceClose = vi.fn(async () => {
+      closeEvents.push("persistence.close");
+    });
+    const app = { runs, close: async () => { await persistenceClose(); } };
+    const scenario = createScenarioRegistry().find("xlm-payment")!;
+    const run = await runs.start(scenario);
+    await vi.waitFor(() => expect(activeLedger.execute).toHaveBeenCalledTimes(1));
+
+    const closing = closeAfterDrain(app, 1_000);
+
+    expect(runs.draining).toBe(true);
+    expect(persistenceClose).not.toHaveBeenCalled();
+    await expect(runs.start(scenario)).rejects.toThrow("server is shutting down");
+    resolveExecution({
+      steps: [{ id: "send-xlm", type: "payment", status: "passed", message: "Confirmed." }],
+      assertions: [{ type: "balanceEquals", status: "passed", expected: "5", actual: "5", message: "Balance matched." }],
+    });
+
+    await closing;
+
+    expect(closeEvents).toEqual(["persistence.close"]);
+  expect(await runs.get(run.id)).toMatchObject({ status: "passed", completedAt: expect.any(String) });
+  });
+
+  it("closes persistence when the bounded drain deadline expires and clears its timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const pendingDrain = new Promise<void>(() => {});
+      const persistenceClose = vi.fn(async () => {});
+      const app = {
+        runs: { drain: () => pendingDrain },
+        close: async () => { await persistenceClose(); },
+      };
+      const closing = closeAfterDrain(app, 100);
+
+      await vi.advanceTimersByTimeAsync(100);
+      await closing;
+
+      expect(persistenceClose).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

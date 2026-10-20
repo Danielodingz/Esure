@@ -1,0 +1,51 @@
+schemaVersion: 1
+id: trustline-balance-reduction
+version: 1
+name: Reject a trustline limit below its balance
+description: Verify that Stellar rejects lowering an issued-asset trustline below its current balance without changing that balance.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: holder
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: limited-asset
+    type: issued
+    code: LIMITED
+    issuer: issuer
+steps:
+  - id: create-trustline
+    type: changeTrust
+    account: holder
+    asset: limited-asset
+    limit: "100"
+  - id: issue-asset
+    type: payment
+    from: issuer
+    to: holder
+    asset: limited-asset
+    amount: "10"
+  - id: lower-limit-below-balance
+    type: changeTrust
+    account: holder
+    asset: limited-asset
+    limit: "5"
+assertions:
+  - type: stepSucceeded
+    step: create-trustline
+  - type: stepSucceeded
+    step: issue-asset
+  - type: stepFailedWith
+    step: lower-limit-below-balance
+    transactionCode: tx_failed
+    operationCodes:
+      - op_invalid_limit
+  - type: balanceEquals
+    account: holder
+    asset: limited-asset
+    amount: "10"
