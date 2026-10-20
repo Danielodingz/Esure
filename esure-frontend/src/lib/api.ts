@@ -73,10 +73,14 @@ export async function listScenarios(signal?: AbortSignal): Promise<ScenarioSumma
   return data.items;
 }
 
-export function startRun(scenarioId: string): Promise<RunReport> {
+export function startRun(scenarioId: string, idempotencyKey?: string): Promise<RunReport> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (idempotencyKey) {
+    headers["idempotency-key"] = idempotencyKey;
+  }
   return request("/api/backend/api/v1/runs", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ scenarioId, inputs: {} }),
   }, isRunReport);
 }
