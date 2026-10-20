@@ -1,7 +1,7 @@
 name: Bug report
 description: Report reproducible incorrect behavior in Esure
 title: "bug: "
-labels: ["type:bug", "status:needs-triage"]
+labels: ["bug"]
 body:
   - type: markdown
     attributes:

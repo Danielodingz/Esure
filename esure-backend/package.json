@@ -3,14 +3,83 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json",
+    "./scenarios/*": "./scenarios/*",
+    "./scenario-schema": {
+      "types": "./dist/scenario-schema.d.ts",
+      "default": "./dist/scenario-schema.js"
+    },
+    "./scenario-schema.js": {
+      "types": "./dist/scenario-schema.d.ts",
+      "default": "./dist/scenario-schema.js"
+    },
+    "./scenario-loader": {
+      "types": "./dist/scenario-loader.d.ts",
+      "default": "./dist/scenario-loader.js"
+    },
+    "./scenario-loader.js": {
+      "types": "./dist/scenario-loader.d.ts",
+      "default": "./dist/scenario-loader.js"
+    },
+    "./scenarios": {
+      "types": "./dist/scenarios.d.ts",
+      "default": "./dist/scenarios.js"
+    },
+    "./scenarios.js": {
+      "types": "./dist/scenarios.d.ts",
+      "default": "./dist/scenarios.js"
+    },
+    "./stellar-gateway": {
+      "types": "./dist/stellar-gateway.d.ts",
+      "default": "./dist/stellar-gateway.js"
+    },
+    "./stellar-gateway.js": {
+      "types": "./dist/stellar-gateway.d.ts",
+      "default": "./dist/stellar-gateway.js"
+    },
+    "./domain": {
+      "types": "./dist/domain.d.ts",
+      "default": "./dist/domain.js"
+    },
+    "./domain.js": {
+      "types": "./dist/domain.d.ts",
+      "default": "./dist/domain.js"
+    },
+    "./src/*.js": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./src/*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist",
+    "scenarios"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "bench:stores": "tsx scripts/benchmark-stores.ts",
     "dev": "tsx watch src/server.ts",
     "generate:api-types": "node scripts/generate-api-types.mjs",
     "db:migrate": "tsx scripts/migrate.ts",
+    "migrate:status": "tsx scripts/migrate-status.ts",
     "db:reconcile": "tsx scripts/reconcile-fixtures.ts",
+    "db:reconcile:dry-run": "tsx scripts/reconcile-fixtures.ts --dry-run",
     "build": "npm run generate:api-types && tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "test": "vitest run",

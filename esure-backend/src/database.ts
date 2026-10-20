@@ -95,6 +95,69 @@ export async function assertMigrationsCurrent(database: Database, directory = re
   }
 }
 
+export interface MigrationFileStatus { version: number; filename: string }
+
+export interface MigrationStatusReport {
+  /** Versions present on disk and applied with a matching filename/checksum. */
+  applied: MigrationFileStatus[];
+  /** Versions present on disk but not yet applied. */
+  pending: MigrationFileStatus[];
+  /** Versions recorded as applied but with no matching file on disk. */
+  unexpected: MigrationFileStatus[];
+  /** Versions applied with a filename/checksum that no longer matches the file on disk. */
+  mismatched: MigrationFileStatus[];
+}
+
+/**
+ * Read-only counterpart to `runMigrations` (issue #79): reports applied,
+ * pending, unexpected, and checksum-mismatched migration versions without
+ * making any schema or data changes. Reuses the same file-enumeration and
+ * checksum logic as `runMigrations`/`assertMigrationsCurrent`.
+ *
+ * Handles an uninitialized database (no `schema_migrations` table yet) by
+ * reporting every file on disk as pending, rather than crashing.
+ */
+export async function migrationStatus(database: Database, directory = resolve(process.cwd(), "migrations")): Promise<MigrationStatusReport> {
+  const files = await migrationFiles(directory);
+  const byVersion = new Map(files.map((file) => [file.version, file]));
+
+  let appliedRows: { version: number; filename: string; checksum: string }[];
+  try {
+    const result = await database.query<{ version: number; filename: string; checksum: string }>(
+      "SELECT version, filename, checksum FROM schema_migrations ORDER BY version",
+    );
+    appliedRows = result.rows;
+  } catch (error) {
+    if (!isUndefinedTableError(error)) throw error;
+    appliedRows = [];
+  }
+
+  const appliedVersions = new Set<number>();
+  const applied: MigrationFileStatus[] = [];
+  const unexpected: MigrationFileStatus[] = [];
+  const mismatched: MigrationFileStatus[] = [];
+  for (const row of appliedRows) {
+    appliedVersions.add(row.version);
+    const file = byVersion.get(row.version);
+    if (!file) { unexpected.push({ version: row.version, filename: row.filename }); continue; }
+    if (file.checksum !== row.checksum || file.filename !== row.filename) {
+      mismatched.push({ version: row.version, filename: row.filename });
+      continue;
+    }
+    applied.push({ version: row.version, filename: row.filename });
+  }
+  const pending = files
+    .filter((file) => !appliedVersions.has(file.version))
+    .map((file) => ({ version: file.version, filename: file.filename }));
+
+  return { applied, pending, unexpected, mismatched };
+}
+
+/** True for Postgres "undefined_table" (42P01) — the migrations table does not exist yet. */
+function isUndefinedTableError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error as { code?: unknown }).code === "42P01";
+}
+
 async function migrationFiles(directory: string) {
   const filenames = (await readdir(directory)).filter((file) => migrationPattern.test(file)).sort();
   return Promise.all(filenames.map(async (filename) => {

@@ -10,6 +10,7 @@ The documentation source for the Esure project.
 - [Scenario format](./SCENARIOS.md)
 - [Issued asset payment lifecycle](./LIFECYCLE_ISSUED_ASSET_PAYMENT.md)
 - [Contributor backlog](./BACKLOG.md)
+- [20 additional contributor issues — 19 October 2026](./ADDITIONAL_ISSUES_2026-10-19.md)
 
 ## Planned content
 
