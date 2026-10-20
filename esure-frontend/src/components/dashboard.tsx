@@ -86,6 +86,9 @@ export function Dashboard() {
   const [catalogueError, setCatalogueError] = useState<string | null>(null);
   const [pollingError, setPollingError] = useState<string | null>(null);
   const [consecutiveFailures, setConsecutiveFailures] = useState(0);
+  const [isOffline, setIsOffline] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<"report" | "compare">("report");
   const [reportFilter, setReportFilter] = useState<ReportFilter>("all");
 
   // #32 — Scenario preview panel
@@ -290,7 +293,7 @@ export function Dashboard() {
   }, [filteredScenarios, selectedId]);
 
   useEffect(() => {
-    if (!run || terminalStatuses.has(run.status)) return;
+    if (!run || isOffline || terminalStatuses.has(run.status)) return;
     if (consecutiveFailures >= 5) return; // Exhausted retries
 
     const activeRunId = run.id;
@@ -373,11 +376,15 @@ export function Dashboard() {
       inFlightController?.abort();
       if (timerId !== null) window.clearTimeout(timerId);
     };
-  }, [run, consecutiveFailures]);
+  }, [run, isOffline, consecutiveFailures]);
 
   const selected = useMemo(() => scenarios.find((scenario) => scenario.id === selectedId), [scenarios, selectedId]);
 
   async function handleRun() {
+    if (!selectedId) return;
+    setIsOffline(false);
+    setImportError(null);
+    setViewMode("report");
     if (!selectedId || rateLimitCountdown !== null) return;
     setStarting(true);
     setError(null);
@@ -411,6 +418,34 @@ export function Dashboard() {
     }
   }
 
+  async function handleImportReport(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    if (file.size > MAX_REPORT_FILE_BYTES) {
+      setImportError(`File is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed size is 5MB.`);
+      return;
+    }
+    try {
+      const text = await file.text();
+      const parsed = parseReportJson(text, MAX_REPORT_FILE_BYTES);
+      setRun(parsed);
+      setIsOffline(true);
+      setImportError(null);
+      setViewMode("report");
+      const newParams = new URLSearchParams(searchParams?.toString() ?? "");
+      newParams.delete("runId");
+      router.replace(pathname + (newParams.toString() ? "?" + newParams.toString() : ""), { scroll: false });
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "Failed to parse report file.");
+    }
+  }
+
+  function handleExitOffline() {
+    setIsOffline(false);
+    setRun(null);
+    setImportError(null);
+  }
   const isRunning = !!run && !terminalStatuses.has(run.status);
 
   return (
@@ -665,32 +700,91 @@ export function Dashboard() {
 
       <section className="results shell">
         <div className="section-heading">
-          <div><p className="eyebrow">02 / INSPECT THE RUN</p><h2>Execution report</h2></div>
-          {run && (
-            <div className="report-controls">
-              <div className="report-filters" role="group" aria-label="Report filter">
-                {REPORT_FILTER_OPTIONS.map((option) => (
-                  <button
-                    key={option.key}
-                    type="button"
-                    aria-pressed={reportFilter === option.key}
-                    className={`filter-pill ${reportFilter === option.key ? "active" : ""}`}
-                    onClick={() => setReportFilter(option.key)}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              {terminalStatuses.has(run.status) && (
-                <button type="button" className="print-button" onClick={() => window.print()}>
-                  Print report
-                </button>
-              )}
-              <StatusBadge status={run.status} />
+          <div><p className="eyebrow">02 / INSPECT THE RUN</p><h2>{viewMode === "compare" ? "Report comparison" : "Execution report"}</h2></div>
+          <div className="report-controls">
+            <div className="report-filters" role="tablist" aria-label="Result mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "report"}
+                className={`filter-pill ${viewMode === "report" ? "active" : ""}`}
+                onClick={() => setViewMode("report")}
+              >
+                Report
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "compare"}
+                className={`filter-pill ${viewMode === "compare" ? "active" : ""}`}
+                onClick={() => setViewMode("compare")}
+              >
+                Compare
+              </button>
             </div>
-          )}
+            {viewMode === "report" && (
+              <label className="print-button" style={{ cursor: "pointer", display: "inline-flex", alignItems: "center" }}>
+                Import offline report
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  data-testid="offline-report-input"
+                  style={{ display: "none" }}
+                  onChange={handleImportReport}
+                />
+              </label>
+            )}
+            {viewMode === "report" && run && (
+              <>
+                <div className="report-filters" role="group" aria-label="Report filter">
+                  {REPORT_FILTER_OPTIONS.map((option) => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      aria-pressed={reportFilter === option.key}
+                      className={`filter-pill ${reportFilter === option.key ? "active" : ""}`}
+                      onClick={() => setReportFilter(option.key)}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+                {terminalStatuses.has(run.status) && (
+                  <button type="button" className="print-button" onClick={() => window.print()}>
+                    Print report
+                  </button>
+                )}
+                <StatusBadge status={run.status} />
+              </>
+            )}
+          </div>
         </div>
-        {!run ? (
+
+        {importError && (
+          <div className="error-banner" role="alert">
+            <WarningIcon />
+            <div>
+              <strong>Could not import report</strong>
+              <span>{importError}</span>
+            </div>
+          </div>
+        )}
+
+        {isOffline && viewMode === "report" && (
+          <div className="offline-evidence-banner" role="status" style={{ padding: "14px 18px", background: "#f5edd6", border: "1px solid #d4c59b", marginBottom: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <strong style={{ display: "block", fontSize: "14px" }}>Offline Evidence (Unverified)</strong>
+              <span style={{ fontSize: "12px", color: "#615234" }}>Imported local report. This evidence has not been re-verified on Testnet.</span>
+            </div>
+            <button type="button" className="run-button run-button--secondary" style={{ padding: "8px 14px", minWidth: "auto", fontSize: "12px" }} onClick={handleExitOffline}>
+              Exit Offline View
+            </button>
+          </div>
+        )}
+
+        {viewMode === "compare" ? (
+          <ReportComparisonView currentRun={run} />
+        ) : !run ? (
           restoringRun ? (
             <div className="empty-report">
               <div className="running-row" style={{ justifyContent: 'center' }}>
@@ -711,6 +805,7 @@ export function Dashboard() {
         ) : (
           <RunView
             run={run}
+            isOffline={isOffline}
             reportFilter={reportFilter}
             scenarioName={scenarios.find((scenario) => scenario.id === run.scenarioId)?.name ?? run.scenarioId}
           />
@@ -823,6 +918,7 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
           <div
             className="timeline-row report-row"
             key={step.id}
+            id={`step-${step.id}`}
             hidden={reportFilter === "failed" && step.status !== "failed"}
           >
             <span className={`step-dot ${step.status}`}><CheckIcon /></span>
@@ -849,7 +945,48 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
           />
           <AssertionRow key={`${assertion.type}-${index}`} assertion={assertion} reportFilter={reportFilter} />
         ))}
-        {run.error && <div className="run-error"><WarningIcon /><div><strong>{run.error.code}</strong><span>{run.error.message}</span></div></div>}
+        {run.error && (
+          <div className="run-error" role="alert">
+            <WarningIcon />
+            <div style={{ flex: 1 }}>
+              <strong>{run.error.code}</strong>
+              <span>{sanitizeErrorMessage(run.error.message, run.error.category)}</span>
+              <details className="error-diagnostics" open style={{ marginTop: "12px", borderTop: "1px dashed #dda395", paddingTop: "8px" }}>
+                <summary style={{ cursor: "pointer", fontSize: "11px", fontWeight: "700", letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                  Diagnostic details
+                </summary>
+                <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "6px 14px", marginTop: "8px", fontSize: "12px" }}>
+                  <span className="label">CATEGORY:</span>
+                  <span>{ERROR_CATEGORY_LABELS[run.error.category] ?? run.error.category}</span>
+                  <span className="label">RETRYABILITY:</span>
+                  <span>{getRetryabilityLabel(run.error.retryable)}</span>
+                  {run.error.failedStepId && (
+                    <>
+                      <span className="label">FAILED STEP:</span>
+                      <span>
+                        <a href={`#step-${run.error.failedStepId}`} style={{ color: "var(--deep)", fontWeight: 600 }}>
+                          {humanize(run.error.failedStepId)}
+                        </a>
+                      </span>
+                    </>
+                  )}
+                  {run.error.stellarTransactionCode && (
+                    <>
+                      <span className="label">TX CODE:</span>
+                      <code>{run.error.stellarTransactionCode}</code>
+                    </>
+                  )}
+                  {run.error.stellarOperationCodes && run.error.stellarOperationCodes.length > 0 && (
+                    <>
+                      <span className="label">OP CODES:</span>
+                      <code>{run.error.stellarOperationCodes.join(", ")}</code>
+                    </>
+                  )}
+                </div>
+              </details>
+            </div>
+          </div>
+        )}
       </div>
       <aside className="summary-card">
         <p className="eyebrow">RUN SUMMARY</p>
@@ -879,6 +1016,179 @@ function RunView({ run, reportFilter, scenarioName }: { run: RunReport; reportFi
   );
 }
 
+function ReportComparisonView({ currentRun }: { currentRun: RunReport | null }) {
+  const [reportA, setReportA] = useState<RunReport | null>(null);
+  const [reportB, setReportB] = useState<RunReport | null>(null);
+  const [errorA, setErrorA] = useState<string | null>(null);
+  const [errorB, setErrorB] = useState<string | null>(null);
+
+  async function handleFileA(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    if (file.size > MAX_REPORT_FILE_BYTES) {
+      setErrorA(`File is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed size is 5MB.`);
+      return;
+    }
+    try {
+      const text = await file.text();
+      setReportA(parseReportJson(text, MAX_REPORT_FILE_BYTES));
+      setErrorA(null);
+    } catch (err) {
+      setErrorA(err instanceof Error ? err.message : "Failed to parse Report A.");
+    }
+  }
+
+  async function handleFileB(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = "";
+    if (file.size > MAX_REPORT_FILE_BYTES) {
+      setErrorB(`File is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed size is 5MB.`);
+      return;
+    }
+    try {
+      const text = await file.text();
+      setReportB(parseReportJson(text, MAX_REPORT_FILE_BYTES));
+      setErrorB(null);
+    } catch (err) {
+      setErrorB(err instanceof Error ? err.message : "Failed to parse Report B.");
+    }
+  }
+
+  const comparison = useMemo(() => {
+    if (!reportA || !reportB) return null;
+    return compareReports(reportA, reportB);
+  }, [reportA, reportB]);
+
+  return (
+    <div className="comparison-container">
+      <div className="comparison-inputs" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "16px", marginBottom: "20px" }}>
+        <div className="comparison-input-card" style={{ border: "1px solid var(--line)", padding: "16px", background: "#f8f6f0" }}>
+          <span className="label">REPORT A (BASE)</span>
+          <div style={{ margin: "10px 0", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <label className="run-button run-button--secondary" style={{ padding: "8px 14px", minWidth: "auto", cursor: "pointer", display: "inline-block" }}>
+              Choose Report A JSON
+              <input type="file" accept=".json,application/json" data-testid="compare-file-a" onChange={handleFileA} style={{ display: "none" }} />
+            </label>
+            {currentRun && (
+              <button
+                type="button"
+                className="run-button run-button--secondary"
+                style={{ padding: "8px 14px", minWidth: "auto" }}
+                onClick={() => { setReportA(currentRun); setErrorA(null); }}
+              >
+                Use current run
+              </button>
+            )}
+          </div>
+          {errorA && <div className="error-banner" role="alert" style={{ margin: "8px 0" }}><span>{errorA}</span></div>}
+          {reportA && (
+            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+              Loaded: <code>{reportA.id}</code> ({reportA.scenarioId} v{reportA.scenarioVersion}) - <strong>{titleCase(reportA.status)}</strong>
+            </div>
+          )}
+        </div>
+
+        <div className="comparison-input-card" style={{ border: "1px solid var(--line)", padding: "16px", background: "#f8f6f0" }}>
+          <span className="label">REPORT B (COMPARISON)</span>
+          <div style={{ margin: "10px 0", display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <label className="run-button run-button--secondary" style={{ padding: "8px 14px", minWidth: "auto", cursor: "pointer", display: "inline-block" }}>
+              Choose Report B JSON
+              <input type="file" accept=".json,application/json" data-testid="compare-file-b" onChange={handleFileB} style={{ display: "none" }} />
+            </label>
+            {currentRun && (
+              <button
+                type="button"
+                className="run-button run-button--secondary"
+                style={{ padding: "8px 14px", minWidth: "auto" }}
+                onClick={() => { setReportB(currentRun); setErrorB(null); }}
+              >
+                Use current run
+              </button>
+            )}
+          </div>
+          {errorB && <div className="error-banner" role="alert" style={{ margin: "8px 0" }}><span>{errorB}</span></div>}
+          {reportB && (
+            <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+              Loaded: <code>{reportB.id}</code> ({reportB.scenarioId} v{reportB.scenarioVersion}) - <strong>{titleCase(reportB.status)}</strong>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {!reportA || !reportB ? (
+        <div className="empty-report">
+          <strong>Select two reports to compare</strong>
+          <p>Upload two JSON export files to view differences in execution duration, step outcomes, and assertions.</p>
+        </div>
+      ) : comparison ? (
+        <div className="comparison-results">
+          {!comparison.scenariosMatch && (
+            <div className="warning-banner" role="alert" style={{ background: "#fef3c7", border: "1px solid #f59e0b", padding: "16px", marginBottom: "16px" }}>
+              <strong style={{ color: "#92400e" }}>Warning: Different scenario content</strong>
+              <p style={{ margin: "4px 0 0", color: "#92400e", fontSize: "13px" }}>
+                These reports describe different scenario content ({!comparison.scenarioIdMatch ? "scenario ID mismatch; " : ""}{!comparison.versionMatch ? "version mismatch; " : ""}{!comparison.contentHashMatch ? "content hash mismatch" : ""}). Outcome differences may be due to scenario specification changes rather than execution behavior, and no claim of causality is made.
+              </p>
+            </div>
+          )}
+
+          <div className="timeline-card" style={{ marginBottom: "16px" }}>
+            <div className="report-meta">
+              <span>SCENARIO</span>
+              <code>{reportA.scenarioId} (v{reportA.scenarioVersion}) vs {reportB.scenarioId} (v{reportB.scenarioVersion})</code>
+              <span>STATUS</span>
+              <code>{titleCase(reportA.status)} → {titleCase(reportB.status)} {comparison.statusChanged ? "(changed)" : "(same)"}</code>
+              <span>DURATION</span>
+              <code>
+                {comparison.durationMsA !== null ? `${(comparison.durationMsA / 1000).toFixed(1)}s` : "N/A"} → {comparison.durationMsB !== null ? `${(comparison.durationMsB / 1000).toFixed(1)}s` : "N/A"}
+                {comparison.durationDiffMs !== null ? ` (diff: ${comparison.durationDiffMs >= 0 ? "+" : ""}${(comparison.durationDiffMs / 1000).toFixed(1)}s)` : ""}
+              </code>
+            </div>
+
+            <div style={{ padding: "16px 24px", borderBottom: "1px solid var(--line)" }}>
+              <span className="label">SUMMARY DIFF</span>
+              <p style={{ margin: "6px 0 0", fontSize: "13px" }}>
+                Steps: {comparison.summary.stepsUnchanged} unchanged, {comparison.summary.stepsChanged} changed, {comparison.summary.stepsAdded} added, {comparison.summary.stepsRemoved} removed.
+                <br />
+                Assertions: {comparison.summary.assertionsUnchanged} unchanged, {comparison.summary.assertionsChanged} changed, {comparison.summary.assertionsAdded} added, {comparison.summary.assertionsRemoved} removed.
+              </p>
+            </div>
+
+            <div style={{ padding: "12px 24px" }}>
+              <span className="label">STEP DIFFERENCES ({comparison.steps.length})</span>
+            </div>
+            {comparison.steps.map((s) => (
+              <div key={s.id} className="timeline-row report-row">
+                <span className={`step-dot ${s.statusB || s.statusA || "failed"}`}><CheckIcon /></span>
+                <div>
+                  <span className="label">{s.type} / {s.statusChange.toUpperCase()}</span>
+                  <strong>{humanize(s.id)}</strong>
+                  <p>
+                    Report A: <code>{s.statusA ?? "none"}</code> | Report B: <code>{s.statusB ?? "none"}</code>
+                  </p>
+                </div>
+              </div>
+            ))}
+
+            <div style={{ padding: "12px 24px", borderTop: "1px solid var(--line)" }}>
+              <span className="label">ASSERTION DIFFERENCES ({comparison.assertions.length})</span>
+            </div>
+            {comparison.assertions.map((a) => (
+              <div key={a.key} className="assertion report-row">
+                <span className={`step-dot ${a.statusB || a.statusA || "failed"}`}><CheckIcon /></span>
+                <div>
+                  <span className="label">{a.key} / {a.statusChange.toUpperCase()}</span>
+                  <strong>{a.type}</strong>
+                  <p style={{ margin: "4px 0 0", fontSize: "12px", color: "var(--muted)" }}>
+                    Report A: <code>{a.statusA ?? "none"}</code> | Report B: <code>{a.statusB ?? "none"}</code>
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
 // #34 — Expandable assertion row with expected / actual values
 function AssertionRow({ assertion, hidden }: { assertion: import("@/lib/api").AssertionResult; hidden?: boolean }) {
 function AssertionRow({ assertion, reportFilter }: { assertion: import("@/lib/api").AssertionResult; reportFilter?: ReportFilter }) {
