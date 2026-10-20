@@ -13,6 +13,7 @@ export const SCENARIO_LIMITS = {
 const id = { type: "string", pattern: "^[a-z][a-z0-9-]{0,63}$", maxLength: 64 } as const;
 const amount = { type: "string", pattern: "^(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,7})?$", maxLength: 20 } as const;
 const positiveAmount = { ...amount, not: { pattern: "^0(?:\\.0+)?$" } } as const;
+const nonNegativeAmount = { ...amount } as const;
 const signedAmount = { type: "string", pattern: "^-?(?:0|[1-9][0-9]{0,11})(?:\\.[0-9]{1,7})?$", maxLength: 21 } as const;
 const code = { type: "string", pattern: "^[A-Z0-9]{1,12}$", maxLength: 12 } as const;
 const resultCode = { type: "string", pattern: "^[a-z][a-z0-9_]{0,63}$", maxLength: 64 } as const;
@@ -44,7 +45,7 @@ export const scenarioSchemaV1 = {
     steps: {
       type: "array", minItems: 0, maxItems: SCENARIO_LIMITS.steps,
       items: { oneOf: [
-        { type: "object", additionalProperties: false, required: ["id", "type", "account", "asset"], properties: { id, type: { const: "changeTrust" }, account: id, asset: id, limit: positiveAmount } },
+        { type: "object", additionalProperties: false, required: ["id", "type", "account", "asset"], properties: { id, type: { const: "changeTrust" }, account: id, asset: id, limit: nonNegativeAmount } },
         { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "asset", "amount"], properties: { id, type: { const: "payment" }, from: id, to: id, asset: id, amount: positiveAmount, memo } },
         { type: "object", additionalProperties: false, required: ["id", "type", "account", "sellingAsset", "buyingAsset", "amount", "price"], properties: { id, type: { const: "manageSellOffer" }, account: id, sellingAsset: id, buyingAsset: id, amount: positiveAmount, price: positiveAmount } },
         { type: "object", additionalProperties: false, required: ["id", "type", "from", "to", "sendAsset", "sendMax", "destAsset", "destAmount", "path"], properties: { id, type: { const: "pathPaymentStrictReceive" }, from: id, to: id, sendAsset: id, sendMax: positiveAmount, destAsset: id, destAmount: positiveAmount, path: { type: "array", maxItems: 5, items: id } } },

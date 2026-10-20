@@ -1,0 +1,39 @@
+schemaVersion: 1
+id: trustline-removal
+version: 1
+name: Trustline removal
+description: Create an empty trustline and remove it by setting limit to zero.
+network: testnet
+accounts:
+  - id: issuer
+    generate: true
+    fund: true
+  - id: holder
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: test-usd
+    type: issued
+    code: TESTUSD
+    issuer: issuer
+steps:
+  - id: create-empty-trustline
+    type: changeTrust
+    account: holder
+    asset: test-usd
+    limit: "100"
+  - id: remove-trustline
+    type: changeTrust
+    account: holder
+    asset: test-usd
+    limit: "0"
+assertions:
+  - type: stepSucceeded
+    step: create-empty-trustline
+  - type: stepSucceeded
+    step: remove-trustline
+  - type: trustlineMissing
+    account: holder
+    asset: test-usd

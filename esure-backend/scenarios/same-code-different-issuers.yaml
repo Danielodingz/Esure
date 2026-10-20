@@ -1,0 +1,73 @@
+schemaVersion: 1
+id: same-code-different-issuers
+version: 1
+name: Same asset code, different issuers
+description: Verify that assets with the same code but different issuers are treated independently.
+network: testnet
+accounts:
+  - id: issuer-a
+    generate: true
+    fund: true
+  - id: issuer-b
+    generate: true
+    fund: true
+  - id: holder
+    generate: true
+    fund: true
+assets:
+  - id: xlm
+    type: native
+  - id: usd-from-a
+    type: issued
+    code: USD
+    issuer: issuer-a
+  - id: usd-from-b
+    type: issued
+    code: USD
+    issuer: issuer-b
+steps:
+  - id: holder-trusts-usd-from-a
+    type: changeTrust
+    account: holder
+    asset: usd-from-a
+    limit: "1000"
+  - id: holder-trusts-usd-from-b
+    type: changeTrust
+    account: holder
+    asset: usd-from-b
+    limit: "500"
+  - id: issue-usd-from-a
+    type: payment
+    from: issuer-a
+    to: holder
+    asset: usd-from-a
+    amount: "100"
+  - id: issue-usd-from-b
+    type: payment
+    from: issuer-b
+    to: holder
+    asset: usd-from-b
+    amount: "50"
+assertions:
+  - type: stepSucceeded
+    step: holder-trusts-usd-from-a
+  - type: stepSucceeded
+    step: holder-trusts-usd-from-b
+  - type: stepSucceeded
+    step: issue-usd-from-a
+  - type: stepSucceeded
+    step: issue-usd-from-b
+  - type: balanceEquals
+    account: holder
+    asset: usd-from-a
+    amount: "100"
+  - type: balanceEquals
+    account: holder
+    asset: usd-from-b
+    amount: "50"
+  - type: trustlineExists
+    account: holder
+    asset: usd-from-a
+  - type: trustlineExists
+    account: holder
+    asset: usd-from-b
