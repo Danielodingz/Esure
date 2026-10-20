@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "id": "recovery-after-expected-failure",
+  "version": 1,
+  "name": "Recovery after expected failure",
+  "description": "Verify scenario execution continues after a matched expected failure: attempt asset payment without trustline (fails), create trustline, retry payment (succeeds)",
+  "network": "testnet",
+  "accounts": [
+    { "id": "issuer", "generate": true, "fund": true },
+    { "id": "recipient", "generate": true, "fund": true }
+  ],
+  "assets": [
+    { "id": "xlm", "type": "native" },
+    { "id": "usd", "type": "issued", "code": "USD", "issuer": "issuer" }
+  ],
+  "steps": [
+    {
+      "id": "fund-recipient",
+      "type": "payment",
+      "from": "issuer",
+      "to": "recipient",
+      "asset": "xlm",
+      "amount": "50"
+    },
+    {
+      "id": "attempt-payment-without-trustline",
+      "type": "payment",
+      "from": "issuer",
+      "to": "recipient",
+      "asset": "usd",
+      "amount": "100"
+    },
+    {
+      "id": "create-trustline",
+      "type": "changeTrust",
+      "account": "recipient",
+      "asset": "usd",
+      "limit": "1000"
+    },
+    {
+      "id": "retry-payment",
+      "type": "payment",
+      "from": "issuer",
+      "to": "recipient",
+      "asset": "usd",
+      "amount": "100"
+    }
+  ],
+  "assertions": [
+    {
+      "type": "stepSucceeded",
+      "step": "fund-recipient"
+    },
+    {
+      "type": "stepFailedWith",
+      "step": "attempt-payment-without-trustline",
+      "transactionCode": "tx_failed",
+      "operationCodes": ["op_no_trust"]
+    },
+    {
+      "type": "stepSucceeded",
+      "step": "create-trustline"
+    },
+    {
+      "type": "stepSucceeded",
+      "step": "retry-payment"
+    },
+    {
+      "type": "balanceEquals",
+      "account": "recipient",
+      "asset": "usd",
+      "amount": "100"
+    },
+    {
+      "type": "transactionConfirmed",
+      "step": "retry-payment"
+    }
+  ]
+}
