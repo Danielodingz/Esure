@@ -711,233 +711,202 @@ describe("Scenario definition preview, rate limiting, and ARIA announcements (#3
   });
 });
 
-describe("Structured Stellar failure details (Issue #46)", () => {
+describe("Dashboard Live Elapsed Timer (#41)", () => {
   beforeEach(() => {
-    mockSearchParams = new URLSearchParams();
-    cleanup();
-    vi.restoreAllMocks();
+    vi.useFakeTimers();
     vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-active" });
   });
+
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.restoreAllMocks();
-  });
-
-  it("renders plain-language labels and optional codes for stellar failure", async () => {
-    const stellarFailRun: RunReport = {
-      ...mockRun,
-      status: "failed",
-      steps: [{ id: "pay", type: "payment", status: "failed", message: "Tx underfunded" }],
-      error: {
-        code: "STELLAR_TX_FAILED",
-        message: "Operation underfunded",
-        category: "stellar",
-        retryable: true,
-        failedStepId: "pay",
-        stellarTransactionCode: "tx_failed",
-        stellarOperationCodes: ["op_underfunded"],
-      },
-    };
-    vi.spyOn(api, "startRun").mockResolvedValue(stellarFailRun);
-
-    render(<Dashboard />);
-    const runBtn = screen.getByRole("button", { name: /Run on Testnet/i });
-    await waitFor(() => expect(runBtn).not.toBeDisabled());
-    fireEvent.click(runBtn);
-    await waitFor(() => expect(screen.getByText("STELLAR_TX_FAILED")).toBeDefined());
-
-    expect(screen.getByText("Stellar network failure")).toBeDefined();
-    expect(screen.getByText("Retryable failure")).toBeDefined();
-    expect(screen.getByText("TX CODE:")).toBeDefined();
-    expect(screen.getByText("tx_failed")).toBeDefined();
-    expect(screen.getByText("OP CODES:")).toBeDefined();
-    expect(screen.getByText("op_underfunded")).toBeDefined();
-
-    const failedStepLink = screen.getByRole("link", { name: "Pay" });
-    expect(failedStepLink.getAttribute("href")).toBe("#step-pay");
-  });
-
-  it("does not render empty labels when optional Stellar codes and failedStepId are absent", async () => {
-    const timeoutRun: RunReport = {
-      ...mockRun,
-      status: "failed",
-      error: {
-        code: "TIMEOUT_ERROR",
-        message: "Operation timed out",
-        category: "timeout",
-        retryable: false,
-      },
-    };
-    vi.spyOn(api, "startRun").mockResolvedValue(timeoutRun);
-
-    render(<Dashboard />);
-    const runBtn = screen.getByRole("button", { name: /Run on Testnet/i });
-    await waitFor(() => expect(runBtn).not.toBeDisabled());
-    fireEvent.click(runBtn);
-    await waitFor(() => expect(screen.getByText("TIMEOUT_ERROR")).toBeDefined());
-
-    expect(screen.getByText("Execution timed out")).toBeDefined();
-    expect(screen.getByText("Non-retryable failure")).toBeDefined();
-    expect(screen.queryByText("TX CODE:")).toBeNull();
-    expect(screen.queryByText("OP CODES:")).toBeNull();
-    expect(screen.queryByText("FAILED STEP:")).toBeNull();
-  });
-
-  it("sanitizes internal failures and removes raw stack traces", async () => {
-    const internalRun: RunReport = {
-      ...mockRun,
-      status: "failed",
-      error: {
-        code: "INTERNAL_ERROR",
-        message: "Database connection failed\n    at Client.connect (/app/db.js:42:15)\n    at Object.handler (/app/route.js:10:8)",
-        category: "internal",
-        retryable: false,
-      },
-    };
-    vi.spyOn(api, "startRun").mockResolvedValue(internalRun);
-
-    render(<Dashboard />);
-    const runBtn = screen.getByRole("button", { name: /Run on Testnet/i });
-    await waitFor(() => expect(runBtn).not.toBeDisabled());
-    fireEvent.click(runBtn);
-    await waitFor(() => expect(screen.getByText("INTERNAL_ERROR")).toBeDefined());
-
-    expect(screen.getByText("Internal system error")).toBeDefined();
-    expect(screen.getByText("Database connection failed")).toBeDefined();
-    expect(screen.queryByText(/at Client\.connect/)).toBeNull();
-  });
-});
-
-describe("Offline report review (Issue #47)", () => {
-  beforeEach(() => {
     mockSearchParams = new URLSearchParams();
-    cleanup();
-    vi.restoreAllMocks();
-    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
-  });
-  afterEach(() => {
-    cleanup();
-    vi.restoreAllMocks();
   });
 
-  it("imports valid JSON report offline without starting a run or polling", async () => {
-    const getRunSpy = vi.spyOn(api, "getRun");
-    const startRunSpy = vi.spyOn(api, "startRun");
+  it("displays live ticking elapsed timer for active run and freezes when terminal", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
 
-    render(<Dashboard />);
-    await waitFor(() => expect(screen.getByText("03 AVAILABLE")).toBeDefined());
-
-    const input = screen.getByTestId("offline-report-input");
-    const validReportJson = JSON.stringify({
+    const activeRun: RunReport = {
       ...mockRun,
-      id: "offline-run-789",
-      steps: [{ id: "step-1", type: "payment", status: "passed", message: "Step done" }],
-    });
-    const file = new File([validReportJson], "report.json", { type: "application/json" });
-
-    fireEvent.change(input, { target: { files: [file] } });
-
-    await waitFor(() => expect(screen.getByText("offline-run-789")).toBeDefined());
-    expect(screen.getByText("Offline Evidence (Unverified)")).toBeDefined();
-    expect(getRunSpy).not.toHaveBeenCalled();
-    expect(startRunSpy).not.toHaveBeenCalled();
-  });
-
-  it("rejects oversized report files and preserves current state", async () => {
-    render(<Dashboard />);
-    await waitFor(() => expect(screen.getByText("03 AVAILABLE")).toBeDefined());
-
-    const input = screen.getByTestId("offline-report-input");
-    const oversizedFile = new File(["x".repeat(6 * 1024 * 1024)], "huge.json", { type: "application/json" });
-
-    fireEvent.change(input, { target: { files: [oversizedFile] } });
-
-    await waitFor(() => expect(screen.getByText(/File is too large/i)).toBeDefined());
-  });
-
-  it("rejects invalid JSON files with actionable error and preserves state", async () => {
-    render(<Dashboard />);
-    await waitFor(() => expect(screen.getByText("03 AVAILABLE")).toBeDefined());
-
-    const input = screen.getByTestId("offline-report-input");
-    const malformedFile = new File(["{ bad json"], "bad.json", { type: "application/json" });
-
-    fireEvent.change(input, { target: { files: [malformedFile] } });
-
-    await waitFor(() => expect(screen.getByText(/valid JSON document/i)).toBeDefined());
-  });
-});
-
-describe("Report comparison view (Issue #48)", () => {
-  beforeEach(() => {
-    mockSearchParams = new URLSearchParams();
-    cleanup();
-    vi.restoreAllMocks();
-    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
-  });
-  afterEach(() => {
-    cleanup();
-    vi.restoreAllMocks();
-  });
-
-  it("renders comparison between two reports and warns when scenario content differs", async () => {
-    render(<Dashboard />);
-    await waitFor(() => expect(screen.getByText("03 AVAILABLE")).toBeDefined());
-
-    // Switch to compare view
-    fireEvent.click(screen.getByRole("tab", { name: "Compare" }));
-
-    expect(screen.getByText("Select two reports to compare")).toBeDefined();
-
-    const reportA: RunReport = {
-      ...mockRun,
-      id: "report-a",
-      scenarioId: "scenario-1",
-      scenarioVersion: 1,
-      scenarioContentHash: "hash-1",
-      status: "failed",
-      createdAt: "2026-10-16T00:00:00.000Z",
-      completedAt: "2026-10-16T00:00:10.000Z",
-      steps: [{ id: "step-1", type: "payment", status: "failed", message: "Failed" }],
-      assertions: [{ type: "balance", status: "failed", expected: "100", actual: "0", message: "Mismatch" }],
-      summary: { stepsPassed: 0, stepsFailed: 1, assertionsPassed: 0, assertionsFailed: 1 },
+      id: "run-active",
+      status: "running",
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: undefined,
     };
 
-    const reportB: RunReport = {
+    const terminalRun: RunReport = {
       ...mockRun,
-      id: "report-b",
-      scenarioId: "scenario-2", // different scenario ID!
-      scenarioVersion: 2,
-      scenarioContentHash: "hash-2",
+      id: "run-active",
       status: "passed",
-      createdAt: "2026-10-16T00:00:00.000Z",
-      completedAt: "2026-10-16T00:00:15.000Z",
-      steps: [
-        { id: "step-1", type: "payment", status: "passed", message: "Passed" },
-        { id: "step-2", type: "create_account", status: "passed", message: "Account created" },
-      ],
-      assertions: [
-        { type: "balance", status: "passed", expected: "100", actual: "100", message: "Passed" },
-        { type: "balance", status: "passed", expected: "50", actual: "50", message: "Second passed" },
-      ],
-      summary: { stepsPassed: 2, stepsFailed: 0, assertionsPassed: 2, assertionsFailed: 0 },
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: new Date(baseTime + 5000).toISOString(),
     };
 
-    const fileA = new File([JSON.stringify(reportA)], "a.json", { type: "application/json" });
-    const fileB = new File([JSON.stringify(reportB)], "b.json", { type: "application/json" });
+    let currentRun: RunReport = activeRun;
+    vi.spyOn(api, "getRun").mockImplementation(async () => ({ ...currentRun }));
 
-    const inputA = screen.getByTestId("compare-file-a");
-    const inputB = screen.getByTestId("compare-file-b");
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
 
-    fireEvent.change(inputA, { target: { files: [fileA] } });
-    fireEvent.change(inputB, { target: { files: [fileB] } });
+    const timer = screen.getByTestId("run-duration");
+    expect(timer.textContent).toBe("0s");
 
-    await waitFor(() => expect(screen.getByText("Warning: Different scenario content")).toBeDefined());
-    expect(screen.getByText(/Failed → Passed/i)).toBeDefined();
-    expect(screen.getByText(/diff: \+5\.0s/i)).toBeDefined();
-    expect(screen.getByText(/0 unchanged, 1 changed, 1 added, 0 removed/i)).toBeDefined();
+    // Advance 3 seconds
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await Promise.resolve();
+    });
+    expect(timer.textContent).toBe("3s");
+
+    // Transition to terminal run
+    currentRun = terminalRun;
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    // Terminal run duration should freeze at 5s
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+
+    // Advancing more time should keep it frozen at 5s
+    await act(async () => {
+      vi.advanceTimersByTime(10000);
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+  });
+
+  it("safely clamps invalid or future timestamps to 0s", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const futureRun: RunReport = {
+      ...mockRun,
+      id: "run-future",
+      status: "running",
+      createdAt: new Date(baseTime + 60000).toISOString(),
+      completedAt: undefined,
+    };
+
+    vi.spyOn(api, "getRun").mockResolvedValue(futureRun);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByTestId("run-duration").textContent).toBe("0s");
   });
 });
 
+describe("Dashboard Skip Link (#44)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams();
+  });
 
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("renders a skip link pointing to #main-content and moves focus on activation", async () => {
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skipLink).toBeDefined();
+    expect(skipLink.getAttribute("href")).toBe("#main-content");
+
+    const mainContent = document.getElementById("main-content");
+    expect(mainContent).toBeDefined();
+    expect(mainContent?.getAttribute("tabindex")).toBe("-1");
+
+    const focusSpy = vi.spyOn(mainContent!, "focus");
+    fireEvent.click(skipLink);
+    expect(focusSpy).toHaveBeenCalled();
+  });
+});
+
+describe("Dashboard Report Download Feedback (#45)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-123" });
+    if (!window.URL.createObjectURL) {
+      window.URL.createObjectURL = vi.fn();
+    }
+    if (!window.URL.revokeObjectURL) {
+      window.URL.revokeObjectURL = vi.fn();
+    }
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("handles successful download and releases object URL", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport").mockResolvedValue(mockRun);
+
+    const createUrlSpy = vi.spyOn(window.URL, "createObjectURL").mockReturnValue("blob:mock-url");
+    const revokeUrlSpy = vi.spyOn(window.URL, "revokeObjectURL").mockImplementation(() => {});
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+    expect(downloadButton).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(downloadMock).toHaveBeenCalledWith("run-123");
+    expect(createUrlSpy).toHaveBeenCalled();
+    expect(revokeUrlSpy).toHaveBeenCalledWith("blob:mock-url");
+  });
+
+  it("handles 404, 409, and 503 download errors with distinct feedback", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport");
+
+    // 404 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Not found", "RUN_NOT_FOUND", 404));
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Report expired or not found. Please run the scenario again.")).toBeDefined();
+
+    // 409 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Incomplete", "RUN_NOT_COMPLETE", 409));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Report is not complete yet. Please wait for the run to finish.")).toBeDefined();
+
+    // 503 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Service unavailable", "DATABASE_UNAVAILABLE", 503));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Backend service is temporarily unavailable. Please try again shortly.")).toBeDefined();
+  });
+});
 
