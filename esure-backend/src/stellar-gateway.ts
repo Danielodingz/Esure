@@ -37,7 +37,27 @@ export interface StellarGatewayOptions {
   horizonRetry?: HorizonRetryConfig;
   fetch?: typeof fetch;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Issue #82: maximum number of concurrent Friendbot funding requests per run. */
+  fundingConcurrency?: number;
+  /** Issue #83: injectable clock for deterministic step-timing tests. */
+  clock?: Clock;
 }
+
+/** Issue #83: a clock abstraction so timing tests can avoid real delays. */
+export interface Clock {
+  /** Monotonic timestamp (ms) suitable for measuring elapsed duration. */
+  monotonicNow: () => number;
+  /** Wall-clock ISO-8601 timestamp suitable for display. */
+  isoNow: () => string;
+}
+
+export const DEFAULT_CLOCK: Clock = {
+  monotonicNow: () => performance.now(),
+  isoNow: () => new Date().toISOString(),
+};
+
+/** Issue #82: default cap on concurrent Friendbot funding requests per run. */
+export const DEFAULT_FUNDING_CONCURRENCY = 5;
 
 export interface HorizonRetryConfig {
   maxRetries?: number;
@@ -130,7 +150,7 @@ export class StellarTestnetGateway implements LedgerGateway {
     const funded = scenario.accounts.filter((account) => account.fund);
     if (funded.length) {
       await this.performRequiredStep("fund-accounts", "fundAccounts", options, steps, async (signal) => {
-        await Promise.all(funded.map((account) => this.fund(required(accounts, account.id), signal, options.friendbotRetry)));
+        await this.fundAll(funded.map((account) => required(accounts, account.id)), signal, options.friendbotRetry);
         return basicStep("fund-accounts", "fundAccounts", "Test accounts funded.");
       });
     }
@@ -144,17 +164,21 @@ export class StellarTestnetGateway implements LedgerGateway {
       }
     }
 
+    const clock = this.#options.clock ?? DEFAULT_CLOCK;
     for (const definition of scenario.steps) {
       const expectedFailure = scenario.assertions.find((assertion): assertion is Extract<ScenarioAssertion, { type: "stepFailedWith" }> => assertion.type === "stepFailedWith" && assertion.step === definition.id);
+      const startedAt = clock.isoNow();
+      const startMark = clock.monotonicNow();
       try {
         const result = await executeBounded(definition.id, options, async () => this.executeOperation(definition, accounts, assets));
-        const outcome = { result, succeeded: true } satisfies StepOutcome;
+        const timed = withTiming(result, startedAt, startMark, clock);
+        const outcome = { result: timed, succeeded: true } satisfies StepOutcome;
         outcomes.set(definition.id, outcome);
-        recordStep(steps, result, options);
+        recordStep(steps, timed, options);
       } catch (error) {
         const safe = normalizeStellarError(error, definition.id);
         const exactExpectedFailure = expectedFailure && matchesFailure(safe, expectedFailure.transactionCode, expectedFailure.operationCodes);
-        const failed = failureStep(definition, safe, Boolean(exactExpectedFailure));
+        const failed = withTiming(failureStep(definition, safe, Boolean(exactExpectedFailure)), startedAt, startMark, clock);
         outcomes.set(definition.id, {
           result: failed,
           succeeded: false,
@@ -287,13 +311,59 @@ export class StellarTestnetGateway implements LedgerGateway {
   }
 
   private async performRequiredStep(id: string, type: string, options: LedgerExecutionOptions, steps: StepResult[], action: (signal: AbortSignal) => Promise<StepResult>): Promise<void> {
+    const clock = this.#options.clock ?? DEFAULT_CLOCK;
+    const startedAt = clock.isoNow();
+    const startMark = clock.monotonicNow();
     try {
-      recordStep(steps, await executeBounded(id, options, action), options);
+      const result = await executeBounded(id, options, action);
+      recordStep(steps, withTiming(result, startedAt, startMark, clock), options);
     } catch (error) {
       const safe = normalizeStellarError(error, id);
-      recordStep(steps, failureStep({ id, type } as ScenarioStep, safe, false), options);
+      const failed = withTiming(failureStep({ id, type } as ScenarioStep, safe, false), startedAt, startMark, clock);
+      recordStep(steps, failed, options);
       throw safe;
     }
+  }
+
+  /**
+   * Issue #82: fund every account requiring Friendbot funding using a
+   * bounded work queue instead of an unbounded Promise.all. At most
+   * `fundingConcurrency` (default DEFAULT_FUNDING_CONCURRENCY) requests
+   * are in flight at once for this run. If any required funding operation
+   * fails, remaining siblings are cancelled (via an internal AbortSignal)
+   * rather than left to fund accounts that will never be used, and no
+   * promise is left unhandled: every worker is awaited through
+   * Promise.all.
+   */
+  private async fundAll(keypairs: Keypair[], signal: AbortSignal, retryOverrides?: FriendbotRetryConfig): Promise<void> {
+    if (!keypairs.length) return;
+    const concurrency = Math.max(1, this.#options.fundingConcurrency ?? DEFAULT_FUNDING_CONCURRENCY);
+    const queue = [...keypairs];
+    const controller = new AbortController();
+    const combinedSignal = signal.aborted ? signal : AbortSignal.any([signal, controller.signal]);
+    let firstError: unknown;
+
+    const worker = async (): Promise<void> => {
+      while (!combinedSignal.aborted) {
+        const keypair = queue.shift();
+        if (!keypair) return;
+        try {
+          await this.fund(keypair, combinedSignal, retryOverrides);
+        } catch (error) {
+          if (firstError === undefined) firstError = error;
+          controller.abort();
+          return;
+        }
+      }
+    };
+
+    const workerCount = Math.min(concurrency, keypairs.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    if (firstError !== undefined) throw firstError;
+    // An external abort (not caused by a sibling failure) may have stopped
+    // dequeuing before every account was funded. Surface that explicitly
+    // rather than silently reporting a successful funding step.
+    if (signal.aborted && queue.length) throw signal.reason ?? new Error("The operation was aborted.");
   }
 
   async fundAccount(
@@ -463,6 +533,13 @@ async function executeBounded<T>(stepId: string, options: LedgerExecutionOptions
 }
 
 function recordStep(steps: StepResult[], result: StepResult, options: LedgerExecutionOptions): void { steps.push(result); options.onStep?.(structuredClone(result)); }
+
+/** Issue #83: attach start/completion timestamps and monotonic elapsed duration to a step result. */
+function withTiming(result: StepResult, startedAt: string, startMark: number, clock: Clock): StepResult {
+  const completedAt = clock.isoNow();
+  const durationMs = Math.max(0, clock.monotonicNow() - startMark);
+  return { ...result, startedAt, completedAt, durationMs };
+}
 function recordAssertion(assertions: AssertionResult[], result: AssertionResult, options: LedgerExecutionOptions): void { assertions.push(result); options.onAssertion?.(structuredClone(result)); }
 function basicStep(id: string, type: string, message: string): StepResult { return { id, type, status: "passed", message }; }
 function transactionStep(id: string, type: string, response: Horizon.HorizonApi.SubmitTransactionResponse): StepResult { return { id, type, status: "passed", transactionHash: response.hash, ledger: response.ledger, message: "Transaction confirmed on Stellar Testnet." }; }

@@ -98,6 +98,15 @@ async function request<T>(url: string, init: RequestInit | undefined, validate: 
   }
 
   if (!response.ok) {
+    if (response.status === 429) {
+      const retryAfterSeconds = parseRetryAfter(response.headers.get("retry-after"));
+      const error = isRecord(data) && isRecord(data.error) ? data.error : null;
+      throw new RateLimitError(
+        error && typeof error.message === "string" ? error.message : "Too many requests. Please wait before trying again.",
+        response.status,
+        retryAfterSeconds,
+      );
+    }
     const error = isRecord(data) && isRecord(data.error) ? data.error : null;
     throw new ApiError(
       error && typeof error.message === "string" ? error.message : "The request failed.",
@@ -454,3 +463,55 @@ export function compareReports(a: RunReport, b: RunReport): ReportComparison {
   };
 }
 
+export interface ScenarioDetail {
+  id: string;
+  version: number;
+  name: string;
+  description: string;
+  contentHash: string;
+  network: "testnet";
+  schemaVersion: number;
+  accounts: { id: string; label?: string }[];
+  assets: { id: string; type: string; code?: string; issuer?: string }[];
+  steps: { id: string; type: string; [key: string]: unknown }[];
+  assertions: { type: string; [key: string]: unknown }[];
+}
+
+function isScenarioDetail(value: unknown): value is ScenarioDetail {
+  return isRecord(value)
+    && isString(value.id)
+    && isNonNegativeInteger(value.version)
+    && value.version > 0
+    && isString(value.name)
+    && isString(value.description)
+    && isString(value.contentHash)
+    && value.network === "testnet"
+    && Array.isArray(value.accounts)
+    && Array.isArray(value.assets)
+    && Array.isArray(value.steps)
+    && Array.isArray(value.assertions);
+}
+
+export function getScenario(scenarioId: string, signal?: AbortSignal): Promise<ScenarioDetail> {
+  return request(`/api/backend/api/v1/scenarios/${encodeURIComponent(scenarioId)}`, { signal }, isScenarioDetail);
+}
+
+export function parseRetryAfter(value: string | null, maxSeconds = 60): number | null {
+  if (!value) return null;
+  const numeric = Number(value.trim());
+  if (!Number.isNaN(numeric) && numeric >= 0) return Math.min(numeric, maxSeconds);
+  const httpDate = Date.parse(value);
+  if (!Number.isNaN(httpDate)) {
+    const seconds = Math.ceil((httpDate - Date.now()) / 1000);
+    return Math.min(Math.max(seconds, 0), maxSeconds);
+  }
+  return null;
+}
+
+export class RateLimitError extends ApiError {
+  readonly retryAfterSeconds: number | null;
+  constructor(message: string, status: number, retryAfterSeconds: number | null) {
+    super(message, "RATE_LIMITED", status);
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}

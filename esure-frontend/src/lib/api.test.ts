@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, compareReports, getRun, listScenarios, parseReportJson, startRun, type RunReport, type ScenarioSummary } from "./api";
+import { ApiError, RateLimitError, getRun, listScenarios, parseRetryAfter, startRun, type RunReport, type ScenarioSummary } from "./api";
 
 const scenario: ScenarioSummary = {
   id: "xlm-payment",
@@ -236,3 +237,61 @@ describe("report comparison (Issue #48)", () => {
   });
 });
 
+describe("parseRetryAfter", () => {
+
+  it("parses a numeric seconds value", () => {
+    expect(parseRetryAfter("30")).toBe(30);
+    expect(parseRetryAfter("0")).toBe(0);
+  });
+
+  it("caps at maxSeconds (default 60)", () => {
+    expect(parseRetryAfter("120")).toBe(60);
+    expect(parseRetryAfter("120", 90)).toBe(90);
+  });
+
+  it("parses an HTTP-date value and returns remaining seconds (capped)", () => {
+    const future = new Date(Date.now() + 5000).toUTCString();
+    const result = parseRetryAfter(future);
+    expect(result).toBeGreaterThanOrEqual(4);
+    expect(result).toBeLessThanOrEqual(6);
+  });
+
+  it("returns null for null, empty, or unparseable values", () => {
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter("")).toBeNull();
+    expect(parseRetryAfter("invalid-date")).toBeNull();
+  });
+
+  it("clamps expired HTTP-date to 0", () => {
+    const past = new Date(Date.now() - 5000).toUTCString();
+    const result = parseRetryAfter(past);
+    expect(result).toBe(0);
+  });
+});
+
+describe("RateLimitError from 429 response", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("throws RateLimitError with parsed retry-after seconds", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: "RATE_LIMITED", message: "Too many requests" } }),
+      { status: 429, headers: { "content-type": "application/json", "retry-after": "15" } }
+    )));
+    const error = await listScenarios().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RateLimitError);
+    if (!(error instanceof RateLimitError)) throw new Error("Expected RateLimitError");
+    expect(error.retryAfterSeconds).toBe(15);
+    expect(error.status).toBe(429);
+  });
+
+  it("throws RateLimitError with null retryAfterSeconds when header is absent", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ error: { code: "RATE_LIMITED", message: "Rate limited" } }),
+      { status: 429, headers: { "content-type": "application/json" } }
+    )));
+    const error = await listScenarios().catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(RateLimitError);
+    if (!(error instanceof RateLimitError)) throw new Error("Expected RateLimitError");
+    expect(error.retryAfterSeconds).toBeNull();
+  });
+});
