@@ -575,3 +575,64 @@ describe("#68 ASCII status markers", () => {
     expect(stdout.join("\n")).toContain("--ascii");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #49 — Strict option parsing and output format validation
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("#49 strict option parsing and output format validation", () => {
+  beforeEach(() => {
+    stdout = [];
+    stderr = [];
+    originalArgv = process.argv;
+    originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+    vi.spyOn(console, "log").mockImplementation((...values: unknown[]) => {
+      stdout.push(values.join(" "));
+    });
+    vi.spyOn(console, "error").mockImplementation((...values: unknown[]) => {
+      stderr.push(values.join(" "));
+    });
+    mocks.list.mockReturnValue(catalog);
+    mocks.find.mockImplementation((id: string) => id === scenario.id ? structuredClone(scenario) : undefined);
+    mocks.createRegistry.mockReturnValue({ list: mocks.list, find: mocks.find });
+    mocks.execute.mockClear();
+    mocks.execute.mockResolvedValue(passedExecution);
+    mocks.readFile.mockReset();
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    process.exitCode = originalExitCode;
+    vi.restoreAllMocks();
+  });
+
+  it("rejects unknown options with a nonzero exit code", async () => {
+    const exitCode = await invokeCli("list", "--unknown-flag");
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain("Unknown option '--unknown-flag'");
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported output format values", async () => {
+    const exitCode = await invokeCli("list", "--output", "xml");
+    expect(exitCode).toBe(1);
+    expect(stderr.join("\n")).toContain('Invalid output format "xml"');
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
+  it("accepts --output json and --output human", async () => {
+    expect(await invokeCli("list", "--output", "json")).toBe(0);
+    expect(await invokeCli("list", "--output", "human")).toBe(0);
+  });
+
+  it("supports help and version aliases (-h, -v, --help, --version)", async () => {
+    expect(await invokeCli("-h")).toBe(1);
+    expect(stdout.join("\n")).toContain("esure - Stellar Testnet scenario testing toolkit");
+
+    stdout = [];
+    expect(await invokeCli("-v")).toBe(0);
+    expect(stdout.join("\n")).toContain("esure v0.1.0");
+  });
+});
+
