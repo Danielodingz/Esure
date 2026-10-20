@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ApiError, compareReports, getRun, listScenarios, parseReportJson, startRun, type RunReport, type ScenarioSummary } from "./api";
 import { ApiError, RateLimitError, getRun, listScenarios, parseRetryAfter, startRun, type RunReport, type ScenarioSummary } from "./api";
 
 const scenario: ScenarioSummary = {
@@ -132,6 +133,107 @@ describe("frontend API response validation", () => {
     });
     if (!(error instanceof ApiError)) throw new Error("Expected ApiError");
     expect(error.message).not.toContain("private upstream diagnostic");
+  });
+});
+
+describe("offline report parsing (Issue #47)", () => {
+  it("parses valid report JSON successfully", () => {
+    const parsed = parseReportJson(JSON.stringify(run));
+    expect(parsed.id).toBe("run-123");
+    expect(parsed.scenarioId).toBe("xlm-payment");
+    expect(parsed.steps).toHaveLength(1);
+  });
+
+  it("rejects files exceeding byte limit", () => {
+    expect(() => parseReportJson(JSON.stringify(run), 10)).toThrow(/too large/i);
+  });
+
+  it("rejects invalid JSON", () => {
+    expect(() => parseReportJson("not json content")).toThrow(/valid JSON document/i);
+  });
+
+  it("rejects invalid report schema", () => {
+    expect(() => parseReportJson(JSON.stringify({ not: "a report" }))).toThrow(/missing required report fields/i);
+  });
+});
+
+describe("report comparison (Issue #48)", () => {
+  const baseRun: RunReport = { ...run };
+  const nextRun: RunReport = {
+    ...run,
+    id: "run-456",
+    status: "passed",
+    completedAt: "2026-10-16T00:00:15.000Z", // 15s duration vs 10s
+    steps: [
+      {
+        id: "pay",
+        type: "payment",
+        status: "passed",
+        message: "Payment succeeded.",
+      },
+      {
+        id: "check",
+        type: "balance",
+        status: "passed",
+        message: "Balance checked.",
+      },
+    ],
+    assertions: [
+      {
+        type: "balanceEquals",
+        status: "passed",
+        expected: "100.0000000",
+        actual: "100.0000000",
+        message: "Balance matches.",
+      },
+      {
+        type: "balanceEquals",
+        status: "passed",
+        expected: "200.0000000",
+        actual: "200.0000000",
+        message: "Second balance matches.",
+      },
+    ],
+    summary: { stepsPassed: 2, stepsFailed: 0, assertionsPassed: 2, assertionsFailed: 0 },
+    error: undefined,
+  };
+
+  it("computes step and assertion differences with stable keys and duration diff", () => {
+    const comp = compareReports(baseRun, nextRun);
+    expect(comp.scenariosMatch).toBe(true);
+    expect(comp.scenarioIdMatch).toBe(true);
+    expect(comp.versionMatch).toBe(true);
+    expect(comp.contentHashMatch).toBe(true);
+    expect(comp.statusA).toBe("failed");
+    expect(comp.statusB).toBe("passed");
+    expect(comp.statusChanged).toBe(true);
+    expect(comp.durationMsA).toBe(10000);
+    expect(comp.durationMsB).toBe(15000);
+    expect(comp.durationDiffMs).toBe(5000);
+
+    // pay changed from failed to passed, check was added
+    expect(comp.steps).toHaveLength(2);
+    const payStep = comp.steps.find((s) => s.id === "pay");
+    expect(payStep?.statusChange).toBe("changed");
+    expect(payStep?.statusA).toBe("failed");
+    expect(payStep?.statusB).toBe("passed");
+
+    const checkStep = comp.steps.find((s) => s.id === "check");
+    expect(checkStep?.statusChange).toBe("added");
+
+    // Assertions: balanceEquals#0 changed from failed to passed; balanceEquals#1 was added
+    expect(comp.assertions).toHaveLength(2);
+    const firstAssert = comp.assertions.find((a) => a.key === "balanceEquals#0");
+    expect(firstAssert?.statusChange).toBe("changed");
+    const secondAssert = comp.assertions.find((a) => a.key === "balanceEquals#1");
+    expect(secondAssert?.statusChange).toBe("added");
+  });
+
+  it("detects scenario mismatch when id, version, or hash differs", () => {
+    const mismatched = { ...nextRun, scenarioId: "other-flow" };
+    const comp = compareReports(baseRun, mismatched);
+    expect(comp.scenariosMatch).toBe(false);
+    expect(comp.scenarioIdMatch).toBe(false);
   });
 });
 

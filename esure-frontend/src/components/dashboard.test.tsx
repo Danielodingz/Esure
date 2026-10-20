@@ -710,3 +710,203 @@ describe("Scenario definition preview, rate limiting, and ARIA announcements (#3
     expect(screen.getByRole("button", { name: /Retry in 15s/i })).toBeDefined();
   });
 });
+
+describe("Dashboard Live Elapsed Timer (#41)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-active" });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    mockSearchParams = new URLSearchParams();
+  });
+
+  it("displays live ticking elapsed timer for active run and freezes when terminal", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const activeRun: RunReport = {
+      ...mockRun,
+      id: "run-active",
+      status: "running",
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: undefined,
+    };
+
+    const terminalRun: RunReport = {
+      ...mockRun,
+      id: "run-active",
+      status: "passed",
+      createdAt: new Date(baseTime).toISOString(),
+      completedAt: new Date(baseTime + 5000).toISOString(),
+    };
+
+    let currentRun: RunReport = activeRun;
+    vi.spyOn(api, "getRun").mockImplementation(async () => ({ ...currentRun }));
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const timer = screen.getByTestId("run-duration");
+    expect(timer.textContent).toBe("0s");
+
+    // Advance 3 seconds
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await Promise.resolve();
+    });
+    expect(timer.textContent).toBe("3s");
+
+    // Transition to terminal run
+    currentRun = terminalRun;
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    // Terminal run duration should freeze at 5s
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+
+    // Advancing more time should keep it frozen at 5s
+    await act(async () => {
+      vi.advanceTimersByTime(10000);
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId("run-duration").textContent).toBe("5s");
+  });
+
+  it("safely clamps invalid or future timestamps to 0s", async () => {
+    const baseTime = new Date("2026-10-16T12:00:00.000Z").getTime();
+    vi.setSystemTime(baseTime);
+
+    const futureRun: RunReport = {
+      ...mockRun,
+      id: "run-future",
+      status: "running",
+      createdAt: new Date(baseTime + 60000).toISOString(),
+      completedAt: undefined,
+    };
+
+    vi.spyOn(api, "getRun").mockResolvedValue(futureRun);
+
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    expect(screen.getByTestId("run-duration").textContent).toBe("0s");
+  });
+});
+
+describe("Dashboard Skip Link (#44)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("renders a skip link pointing to #main-content and moves focus on activation", async () => {
+    render(<Dashboard />);
+    await act(async () => { await Promise.resolve(); });
+
+    const skipLink = screen.getByRole("link", { name: "Skip to main content" });
+    expect(skipLink).toBeDefined();
+    expect(skipLink.getAttribute("href")).toBe("#main-content");
+
+    const mainContent = document.getElementById("main-content");
+    expect(mainContent).toBeDefined();
+    expect(mainContent?.getAttribute("tabindex")).toBe("-1");
+
+    const focusSpy = vi.spyOn(mainContent!, "focus");
+    fireEvent.click(skipLink);
+    expect(focusSpy).toHaveBeenCalled();
+  });
+});
+
+describe("Dashboard Report Download Feedback (#45)", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listScenarios").mockResolvedValue(mockScenarios);
+    mockSearchParams = new URLSearchParams({ runId: "run-123" });
+    if (!window.URL.createObjectURL) {
+      window.URL.createObjectURL = vi.fn();
+    }
+    if (!window.URL.revokeObjectURL) {
+      window.URL.revokeObjectURL = vi.fn();
+    }
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("handles successful download and releases object URL", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport").mockResolvedValue(mockRun);
+
+    const createUrlSpy = vi.spyOn(window.URL, "createObjectURL").mockReturnValue("blob:mock-url");
+    const revokeUrlSpy = vi.spyOn(window.URL, "revokeObjectURL").mockImplementation(() => {});
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+    expect(downloadButton).toBeDefined();
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(downloadMock).toHaveBeenCalledWith("run-123");
+    expect(createUrlSpy).toHaveBeenCalled();
+    expect(revokeUrlSpy).toHaveBeenCalledWith("blob:mock-url");
+  });
+
+  it("handles 404, 409, and 503 download errors with distinct feedback", async () => {
+    vi.spyOn(api, "getRun").mockResolvedValue(mockRun);
+    const downloadMock = vi.spyOn(api, "downloadReport");
+
+    // 404 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Not found", "RUN_NOT_FOUND", 404));
+
+    render(<Dashboard />);
+    await screen.findByText("run-123");
+
+    const downloadButton = screen.getByRole("button", { name: /download json report/i });
+
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Report expired or not found. Please run the scenario again.")).toBeDefined();
+
+    // 409 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Incomplete", "RUN_NOT_COMPLETE", 409));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Report is not complete yet. Please wait for the run to finish.")).toBeDefined();
+
+    // 503 error
+    downloadMock.mockRejectedValueOnce(new api.ApiError("Service unavailable", "DATABASE_UNAVAILABLE", 503));
+    await act(async () => {
+      fireEvent.click(downloadButton);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Backend service is temporarily unavailable. Please try again shortly.")).toBeDefined();
+  });
+});
+
