@@ -28,7 +28,9 @@ interface CliOptions {
   reportFile?: string;
   /** #60 — write JUnit XML test report to a file */
   junit?: string;
-  /** #59, #60, #62 — overwrite existing destination file */
+  /** #157 — write CSV assertion results to a file */
+  csv?: string;
+  /** #59, #60, #62, #157 — overwrite existing destination file */
   overwrite?: boolean;
 }
 
@@ -70,7 +72,8 @@ Options:
   --ascii                  Use ASCII status markers (PASS/FAIL) instead of Unicode glyphs
   --report-file <path>     Write run report JSON to a file
   --junit <path>           Write JUnit XML test results to a file
-  --overwrite              Overwrite existing output files (--report-file, --junit, init)
+  --csv <path>             Write assertion results as CSV to a file
+  --overwrite              Overwrite existing output files (--report-file, --junit, --csv, init)
   --fail-fast              (run-suite) Stop after first failure
   --help                   Show this help message
   --version                Show version information
@@ -82,6 +85,7 @@ Examples:
   esure run xlm-payment
   esure run ./my-scenario.yaml --output json --report-file report.json
   esure run ./my-scenario.yaml --junit junit.xml
+  esure run ./my-scenario.yaml --csv assertions.csv
   esure run-suite xlm-payment path-payment --fail-fast --report-file suite.json --junit suite.xml
 
 Documentation: https://github.com/Esureorg/Esure
@@ -112,6 +116,7 @@ function parseCliArgs(): {
       "report-file": { type: "string" },
       junit: { type: "string" },
       "junit-file": { type: "string" },
+      csv: { type: "string" },
       overwrite: { type: "boolean" },
       force: { type: "boolean" },
     },
@@ -136,6 +141,7 @@ function parseCliArgs(): {
       ascii: Boolean(values.ascii),
       reportFile: typeof values["report-file"] === "string" ? values["report-file"] : undefined,
       junit: rawJunit,
+      csv: typeof values.csv === "string" ? values.csv : undefined,
       overwrite: Boolean(values.overwrite || values.force),
     },
     failFast: Boolean(values["fail-fast"]),
@@ -221,6 +227,34 @@ function buildRunReport(
 // ─────────────────────────────────────────────────────────────────────────────
 // Artifact writing & JUnit export (#59, #60, #62)
 // ─────────────────────────────────────────────────────────────────────────────
+
+function escapeCsv(value: unknown): string {
+  const str = String(value ?? "");
+  if (str.includes(",") || str.includes('"') || str.includes("\n")) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export function generateCsv(runs: ScenarioRunResultForJunit[]): string {
+  const rows: string[] = [
+    ["Scenario", "Type", "Status", "Message"].map(escapeCsv).join(","),
+  ];
+
+  for (const run of runs) {
+    if (run.execution) {
+      for (const assertion of run.execution.assertions) {
+        rows.push(
+          [run.scenarioId, assertion.type, assertion.status, assertion.message]
+            .map(escapeCsv)
+            .join(","),
+        );
+      }
+    }
+  }
+
+  return rows.join("\n") + "\n";
+}
 
 export function escapeXml(unsafe: string): string {
   return String(unsafe)
@@ -308,7 +342,7 @@ export async function writeArtifactFile(
   filePath: string,
   content: string,
   overwrite: boolean,
-  artifactType: "report" | "JUnit" | "scaffold",
+  artifactType: "report" | "JUnit" | "CSV" | "scaffold",
 ): Promise<void> {
   const absolutePath = resolve(filePath);
 
@@ -322,7 +356,7 @@ export async function writeArtifactFile(
 
   if (exists && !overwrite) {
     const typeLabel =
-      artifactType === "report" ? "Report" : artifactType === "JUnit" ? "JUnit" : "Scenario";
+      artifactType === "report" ? "Report" : artifactType === "JUnit" ? "JUnit" : artifactType === "CSV" ? "CSV" : "Scenario";
     throw new Error(`${typeLabel} file "${filePath}" already exists. Use --overwrite to replace it.`);
   }
 
@@ -616,7 +650,7 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
     }
   }
 
-  // Handle artifact exports (#59, #60)
+  // Handle artifact exports (#59, #60, #157)
   const scenarioId = scenario?.id ?? target;
   let artifactError = false;
 
@@ -668,6 +702,32 @@ async function runCommand(target: string, options: CliOptions): Promise<number> 
         console.error(JSON.stringify({ error: { message: msg } }));
       } else {
         console.error(`Error writing JUnit file: ${msg}`);
+      }
+    }
+  }
+
+  if (options.csv) {
+    try {
+      const csv = generateCsv([
+        {
+          scenarioId,
+          execution,
+          error: executionError ? { message: executionError.message } : undefined,
+        },
+      ]);
+      await writeArtifactFile(
+        options.csv,
+        csv,
+        Boolean(options.overwrite),
+        "CSV",
+      );
+    } catch (err: unknown) {
+      artifactError = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.output === "json") {
+        console.error(JSON.stringify({ error: { message: msg } }));
+      } else {
+        console.error(`Error writing CSV file: ${msg}`);
       }
     }
   }

@@ -9,6 +9,25 @@ const terminalStatuses = new Set(["passed", "failed"]);
 export type ScenarioFilter = "all" | "xlm" | "issued-asset" | "expected-failure";
 export type SortOrder = "name-asc" | "name-desc" | "id-asc";
 
+const FAVORITES_STORAGE_KEY = "esure:favorite-scenarios";
+
+function getFavorites(): Set<string> {
+  try {
+    const stored = localStorage.getItem(FAVORITES_STORAGE_KEY);
+    return new Set(stored ? JSON.parse(stored) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveFavorites(favorites: Set<string>): void {
+  try {
+    localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(Array.from(favorites)));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export const FILTER_OPTIONS: { key: ScenarioFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "xlm", label: "XLM" },
@@ -106,6 +125,12 @@ export function Dashboard() {
   // Sort state (#30)
   const [sortOrder, setSortOrder] = useState<SortOrder>("name-asc");
 
+  // Favorites state (#154)
+  const [favorites, setFavorites] = useState<Set<string>>(() => getFavorites());
+
+  // Idempotency key for run creation (#151)
+  const [runIdempotencyKey, setRunIdempotencyKey] = useState<string>(() => crypto.randomUUID());
+
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -116,26 +141,54 @@ export function Dashboard() {
     parseCategory(searchParams?.get("category") ?? null),
   );
 
-  // Sync filter <-> URL (without clobbering other params)
-  const prevFilterRef = useRef<ScenarioFilter>(filter);
+  // Sync filter, search, and sort with URL (#31, #153)
+  const prevStateRef = useRef<{ filter: ScenarioFilter; search: string; sort: SortOrder }>({
+    filter,
+    search: searchQuery,
+    sort: sortOrder,
+  });
+
   useEffect(() => {
-    if (prevFilterRef.current === filter) return;
-    prevFilterRef.current = filter;
+    const state = { filter, search: searchQuery, sort: sortOrder };
+    if (
+      prevStateRef.current.filter === filter &&
+      prevStateRef.current.search === searchQuery &&
+      prevStateRef.current.sort === sortOrder
+    ) {
+      return;
+    }
+    prevStateRef.current = state;
+
     const newParams = new URLSearchParams(searchParams?.toString() ?? "");
     if (filter === "all") {
       newParams.delete("category");
     } else {
       newParams.set("category", filter);
     }
+    if (searchQuery.trim()) {
+      newParams.set("search", searchQuery.trim());
+    } else {
+      newParams.delete("search");
+    }
+    if (sortOrder !== "name-asc") {
+      newParams.set("sort", sortOrder);
+    } else {
+      newParams.delete("sort");
+    }
     router.replace(pathname + (newParams.toString() ? "?" + newParams.toString() : ""), { scroll: false });
-  }, [filter, pathname, router, searchParams]);
+  }, [filter, searchQuery, sortOrder, pathname, router, searchParams]);
 
-  // Keep filter in sync when URL changes via back/forward (#31)
-  const urlCategory = searchParams?.get("category") ?? null;
+  // Keep state in sync when URL changes via back/forward (#31, #153)
   useEffect(() => {
+    const urlCategory = searchParams?.get("category") ?? null;
+    const urlSearch = searchParams?.get("search") ?? "";
+    const urlSort = searchParams?.get("sort") ?? "name-asc";
+
     const parsed = parseCategory(urlCategory);
     setFilter((prev) => (prev !== parsed ? parsed : prev));
-  }, [urlCategory]);
+    setSearchQuery((prev) => (prev !== urlSearch ? urlSearch : prev));
+    setSortOrder((prev) => (prev !== (urlSort as SortOrder) ? (urlSort as SortOrder) : prev));
+  }, [searchParams]);
 
   const [restoringRun, setRestoringRun] = useState(false);
   const [restorationError, setRestorationError] = useState<string | null>(null);
@@ -380,8 +433,10 @@ export function Dashboard() {
     setError(null);
     setRun(null);
     try {
-      const newRun = await startRun(selectedId);
+      const key = crypto.randomUUID();
+      const newRun = await startRun(selectedId, key);
       setRun(newRun);
+      setRunIdempotencyKey(crypto.randomUUID());
       const newParams = new URLSearchParams(searchParams?.toString() ?? "");
       newParams.set("runId", newRun.id);
       router.replace(pathname + "?" + newParams.toString(), { scroll: false });
@@ -406,6 +461,19 @@ export function Dashboard() {
     } finally {
       setStarting(false);
     }
+  }
+
+  function toggleFavorite(scenarioId: string) {
+    setFavorites((prev) => {
+      const updated = new Set(prev);
+      if (updated.has(scenarioId)) {
+        updated.delete(scenarioId);
+      } else {
+        updated.add(scenarioId);
+      }
+      saveFavorites(updated);
+      return updated;
+    });
   }
 
   const isRunning = !!run && !terminalStatuses.has(run.status);
@@ -579,6 +647,15 @@ export function Dashboard() {
                 <span className="scenario-name">{scenario.name}</span>
                 <span className="scenario-description">{scenario.description}</span>
                 <span className="version">V{scenario.version}</span>
+                <button
+                  type="button"
+                  className={`favorite-btn ${favorites.has(scenario.id) ? "active" : ""}`}
+                  aria-label={`${favorites.has(scenario.id) ? "Remove from" : "Add to"} favorites`}
+                  aria-pressed={favorites.has(scenario.id)}
+                  onClick={(e) => { e.stopPropagation(); toggleFavorite(scenario.id); }}
+                >
+                  ★
+                </button>
                 <button
                   type="button"
                   className="preview-btn"
